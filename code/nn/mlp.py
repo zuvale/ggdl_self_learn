@@ -29,7 +29,7 @@ class MLP(nn.Module):
     """
     def __init__(
             self, n_feats: int, out_size: int, 
-            hidden_sizes: None|int|list[int]=None,
+            hidden_sizes: None|int|list[int]=None, use_batchnorm: bool=False,
             act_funs: list[nn.Module]|nn.Module=nn.ReLU, flatten=False
         ) -> None:
         super().__init__()
@@ -48,12 +48,16 @@ class MLP(nn.Module):
                 act_funs = [act_funs]*n_layers
 
             fc_block_list = [
-                FCLayer(n_in, n_out, use_batchnorm=False, act_fun=a_fun)
+                FCLayer(
+                    n_in, n_out, use_batchnorm=use_batchnorm, act_fun=a_fun)
                 for n_in, n_out, a_fun
                 in zip(in_layer_sizes, out_layer_sizes, act_funs)
             ]
         else:
-            fc_block_list = [FCLayer(n_feats, out_size, act_fun=act_funs)]
+            fc_block_list = [FCLayer(
+                n_feats, out_size, use_batchnorm=use_batchnorm,
+                act_fun=act_funs
+            )]
         
         if isinstance(flatten, bool) and flatten == True:
             fc_block_list.insert(0, nn.Flatten())
