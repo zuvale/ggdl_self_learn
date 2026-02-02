@@ -1,3 +1,8 @@
+## TO-DO:
+# - add shape checks for intermediate steps too in UNet class
+# - reduce boilerplate regarding similar structure of CNN2DToFC and UNet
+# - move code calculating the convolution output sizes to dedicated functions
+#   in another script
 import torch
 import torch.nn as nn
 from typing import List
@@ -10,8 +15,8 @@ class Conv2DLayer(nn.Module):
         conv_pad_size: int, conv_stride_size: int=1, pool: None|str="max",
         pool_kernel_size: None|int=None, pool_stride: None|int=None,
         pool_padding: None|int=None,
-        skip: bool=False, use_batchnorm: bool=False, act_fun=nn.ReLU,
-        act_fun_pos: str="after_pool"
+        skip: bool=False, use_batchnorm: bool=False,
+        act_fun: nn.Module=nn.ReLU, act_fun_pos: str="after_pool"
     ) -> None:
         super().__init__()
 
@@ -53,7 +58,7 @@ class TransposeConv2DLayer(nn.Module):
     def __init__(
         self, in_chans: int, out_chans: int, kernel_size: int, in_pad_size: int,
         out_pad_size: int, stride_size: int, use_batchnorm: bool=False,
-        act_fun=nn.ReLU
+        act_fun: nn.Module=nn.ReLU
     ) -> None:
         super().__init__()
         
@@ -73,10 +78,74 @@ class TransposeConv2DLayer(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.tconv2d_layer(x)
 
+class CNN2DToFC(nn.Module):
+    def __init__(
+        self, n_feats: int, in_channels: int, out_channels: int,
+        hidden_channels: List[int],
+        # convolution hyperparameters
+        conv_kernel_sizes: List[int], conv_stride_sizes: List[int],
+        conv_paddings: List[int], pool_kernel_sizes: List[int],
+        pool_stride_sizes: List[int], pool_padding_sizes: List[int],
+        # mlp hyperparameters
+        fc_head: nn.Module, fc_in_size: int,
+        pool: str="max",
+        act_fun: nn.Module=nn.ReLU
+    ) -> None:
+        super().__init__()
+
+        self.n_layers = len(hidden_channels)
+        if hidden_channels:
+            hidden_channels = [in_channels] + hidden_channels + [out_channels]
+        else:
+            hidden_channels = [in_channels, out_channels]
+        in_channels = hidden_channels[0:-1]
+        out_channels = hidden_channels[1:]
+
+        conv_layers = []
+        n_feats_prime = n_feats
+        for i_c, o_c, c_k, c_s, c_p, p_k, p_s, p_p in zip(
+            in_channels, out_channels,
+            conv_kernel_sizes, conv_stride_sizes, conv_paddings,
+            pool_kernel_sizes, pool_stride_sizes, pool_padding_sizes,
+        ):
+            conv_layers.append(Conv2DLayer(
+                i_c, o_c, c_k, c_p, c_s, pool=None, act_fun=act_fun,
+                act_fun_pos="after_conv"
+            ))
+            n_feats_prime = self.get_conv_pool_out_size(
+                n_feats_prime, c_k, c_p, c_s)
+            if p_k > 0:
+                if pool == "max":
+                    conv_layers.append(nn.MaxPool2d(p_k, p_s, padding=p_p))
+                elif pool == "avg":
+                    conv_layers.append(nn.AvgPool2d(p_k, p_s, padding=p_p))
+                n_feats_prime = self.get_conv_pool_out_size(
+                    n_feats_prime, p_k, p_p, p_s)
+        
+        self.conv_layers = nn.Sequential(*conv_layers)
+        final_numels = hidden_channels[-1] * n_feats_prime**2
+        self.fc_mapper = nn.Linear(final_numels, fc_in_size)
+        self.fc_head = fc_head
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.conv_layers(x)
+        x = torch.flatten(x, start_dim=1)
+        x = self.fc_mapper(x)
+        x = self.fc_head(x)
+        return x
+    
+    @staticmethod
+    def get_conv_pool_out_size(w: int, k: int, p: int, s: int) -> int:
+        """
+        w: input size
+        k: kernel size
+        p: padding
+        s: stride
+        """
+        w_prime = (w - k + 2*p)//s + 1
+        return w_prime
+
 class UNet(nn.Module):
-    """
-    TO-DO: Add shape checks for intermediate steps too
-    """
     def __init__(
         self, n_feats: int, n_channels: int, hidden_channels: List[int],
         # convolution hyperparameters
@@ -87,7 +156,7 @@ class UNet(nn.Module):
         tconv_kernel_sizes: List[int], tconv_stride_sizes: List[int],
         tconv_in_paddings: List[int], tconv_out_paddings: List[int],
         pool: str="max",
-        act_fun: torch.nn.modules.activation=nn.LogSigmoid
+        act_fun: nn.Module=nn.LogSigmoid
     ) -> None:
         assert (
             len(hidden_channels) == len(conv_kernel_sizes)
