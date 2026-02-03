@@ -96,12 +96,20 @@ if __name__ == "__main__":
         ),
         batch_size=BATCH_SIZE, shuffle=True
     )
+    mnist_test_loader = torch.utils.data.DataLoader(
+        datasets.MNIST(
+            PROJECT_DIR / "data", train=False, download=True,
+            transform=transforms.Compose([transforms.ToTensor()])
+        ),
+        batch_size=BATCH_SIZE*4, shuffle=True
+    )
 
     if cli_args.noising_style == "ddpm":
         problem = DDPMUNetMNISTSearchProblem(
             bounds=UNET_BOUNDS + OPTIM_BOUNDS + DIFFUSION_BOUNDS,
             data_shape=(1, 28, 28), train_loader=mnist_train_loader,
-            n_epochs=EPOCHS, n_timesteps=TIMESTEPS, device=DEVICE
+            test_loader=mnist_test_loader, n_epochs=EPOCHS,
+            n_timesteps=TIMESTEPS, device=DEVICE
         )
     
     optimizer_hpo = L_SHADE(epoch=GENERATIONS, pop_size=POP_SIZE)
