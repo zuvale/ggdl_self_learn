@@ -195,20 +195,24 @@ class DiffusionEpsilonParam(DiffusionModel):
         
         return epsilon, epsilon_theta, t
 
+    @torch.inference_mode()
     def sample(
         self, sample_shape: Tuple[int]|torch.Size=(1,), n_steps: int|None=None,
         start_time: int=0, y: torch.Tensor|None=None,
         show_path: bool=False, **kwargs
     ) -> torch.Tensor:
         n_steps = n_steps if n_steps is not None else self.T
-        z_ts = [self.base().sample(sample_shape)]
+        z_t = self.base().sample(sample_shape)
+        if show_path:
+            z_ts = [z_t]
 
         for t in reversed(range(start_time, n_steps)):
-            z_t = z_ts[-1]
-            z_ts.append(self.sampling_step(t, z_t, y=y, **kwargs))
+            z_t = self.sampling_step(t, z_t, y=y, **kwargs)
+            if show_path:
+                z_ts.append(z_t)
         
         if not show_path:
-            return z_ts[-1]
+            return z_t
         else:
             return torch.stack(z_ts, dim=0)
 
@@ -272,6 +276,7 @@ class VDMReverseProcess(DiffusionEpsilonParam):
             return mean
 
 class DDIMReverseProcess(DiffusionEpsilonParam):
+    @torch.inference_mode()
     def sample(
         self, sample_shape: Tuple[int]|torch.Size=(1,), n_steps: int|None=None,
         start_time: int=0, y: torch.Tensor|None=None, variance: float=1.0,
@@ -279,7 +284,9 @@ class DDIMReverseProcess(DiffusionEpsilonParam):
         alpha_bar_in_logsnr: bool=False, **kwargs
     ) -> torch.Tensor:
         n_steps = n_steps if n_steps is not None else self.T
-        z_ts = [self.base().sample(sample_shape)]
+        z_t = self.base().sample(sample_shape)
+        if show_path:
+            z_ts = [z_t]
         
         timegrid = torch.linspace(0.0, 1.0, self.T, device=z_ts[-1].device)
         if spacing == "uniform":
@@ -291,12 +298,13 @@ class DDIMReverseProcess(DiffusionEpsilonParam):
                 alpha_bar_in_logsnr=alpha_bar_in_logsnr
             )
         for tau_t, tau_s in zip(Ts[:-1], Ts[1:]):
-            z_t = z_ts[-1]
-            z_ts.append(self.sampling_step(
-                start_time, tau_t, tau_s, z_t, y=y, eta=variance, **kwargs))
+            z_t = self.sampling_step(
+                start_time, tau_t, tau_s, z_t, y=y, eta=variance, **kwargs)
+            if show_path:
+                z_ts.append(z_t)
         
         if not show_path:
-            return z_ts[-1]
+            return z_t
         else:
             return torch.stack(z_ts, dim=0)
     
