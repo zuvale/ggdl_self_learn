@@ -9,6 +9,7 @@ from generative.diffusion import (
     ConstantLinearSchedule, LearnableLinearSchedule,
     DDPMReverseProcess, DDIMReverseProcess
 )
+from utilities.metrics import DiffusionBPDEvaluator
 from .basic_nn import create_unet
 from .utils import get_act_fun, get_optim
 
@@ -28,10 +29,12 @@ class DiffusionSearchProblem(Problem):
     def __init__(
         self, bounds: Iterable[BaseVar]|None=None, minmax: str="min",
         data: None=None, data_shape: Tuple[int]=(1,), train_loader=None,
-        n_epochs: int=100, n_timesteps: int=1000, device: str="cpu", **kwargs
+        test_loader=None, n_epochs: int=100, n_timesteps: int=1000,
+        device: str="cpu", **kwargs
     ) -> None:
         self.data_shape = data_shape
         self.train_loader = train_loader
+        self.test_loader = test_loader
         self.n_epochs = n_epochs
         self.n_timesteps = n_timesteps
         self.device = device
@@ -56,7 +59,15 @@ class DiffusionSearchProblem(Problem):
             
             self.training_loop(model, optimizer, scheduler)
 
-            return self.evaluate(model)
+            obj_val = self.evaluate(model)
+
+            # clean up the GPU memory since the model is not needed anymore
+            del model
+            import gc
+            gc.collect()
+            torch.cuda.empty_cache() 
+
+            return obj_val
 
         except:
             print("bad initialization!")
@@ -65,7 +76,7 @@ class DiffusionSearchProblem(Problem):
     def training_loop(self, model: nn.Module, optimizer, scheduler) -> None:
         return NotImplementedError
     
-    def evaluate(self, model) -> float:
+    def evaluate(self, model: nn.Module) -> float:
         return NotImplementedError
     
     def _define_score_network(self, hyperpars: Dict) -> nn.Module:
@@ -109,3 +120,19 @@ class DDPMUNetMNISTSearchProblem(DiffusionMNISTSearchProblem):
             unet_type="time_class_filmed",
             film_act_fun=get_act_fun(hyperpars["f_act_fun"])
         )
+    
+    def evaluate(self, model: nn.Module) -> float:
+        model.eval()
+        evaluator = DiffusionBPDEvaluator(model)
+
+        bpd = 0
+        for x, y in self.test_loader:
+            x, y = x.to(self.device), y.to(self.device)
+            x = x*2.0 - 1.0
+
+            metrics = evaluator.calculate_bpd(x, y=y)
+            bpd_i = metrics["total_bpd"].mean().detach().cpu().numpy().item()
+            bpd += bpd_i
+        
+        bpd /= len(self.test_loader)
+        return bpd
