@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # TO-DO:
-# make project directory dynamic
+# - make project directory dynamic
+# - put MNIST dataloaders in separate script
 from pathlib import Path
 PROJECT_DIR = Path("/home/alzub/projects/ggdl_self_learn")
 
@@ -20,7 +21,7 @@ if __name__ == "__main__":
     common_parser = argparse.ArgumentParser(add_help=False)
     common_parser.add_argument(
         "-o", "--output-file", type=str,
-        help="directory to store the final neural architecture configuration in"
+        help="file to store the final neural architecture configuration in"
     )
     common_parser.add_argument(
         "-g", "--generations", type=int,
@@ -49,6 +50,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         prog="diffusion_unet_nas.py",
         description="perform a naive neural architecture search of a diffusion model configuration using metaheuristic optimization",
+        parents=[common_parser]
     )
 
     subparsers = parser.add_subparsers(dest="noising_style", required=True)
