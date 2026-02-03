@@ -1,3 +1,5 @@
+## TO-DO:
+# - use the extract function from utilities module (and make a broadcast function there too)
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
