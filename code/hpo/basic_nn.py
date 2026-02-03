@@ -141,21 +141,6 @@ def create_unet(
             **other_kwargs
         )
     elif unet_type == "time_class_filmed":
-        #print(
-        #    "convolution",
-        #    len(hidden_channel_sizes[:num_hidden_layers]),
-        #    len(conv_kernel_sizes), len(conv_stride_sizes),
-        #    len(conv_padding_sizes)
-        #)
-        #print(
-        #    "pooling", len(pool_kernel_sizes), len(pool_stride_sizes),
-        #    len(pool_padding_sizes[:num_hidden_layers])
-        #)
-        #print(
-        #    "tconv",
-        #    len(tconv_kernel_sizes), len(tconv_stride_sizes),
-        #    len(tconv_in_pad_sizes), len(tconv_out_pad_sizes)
-        #)
         return UNetTimeClassDependent(
             *other_args,
             n_feats, input_channels, hidden_channel_sizes[:num_hidden_layers],
