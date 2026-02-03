@@ -88,7 +88,7 @@ if __name__ == "__main__":
             x = x.to(DEVICE)
             y = y.to(DEVICE)
 
-            y_hat_logits = model(x)
+            y_hat_logits = model(x, return_final_feats=False)
             loss = loss_fun(y_hat_logits, y)
 
             loss.backward()

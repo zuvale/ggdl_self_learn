@@ -5,7 +5,7 @@ import torch.nn as nn
 
 class MNISTClassifier(cnn.CNN2DToFC):
     def forward(
-        self, x: torch.Tensor, return_final_feats: bool=False
+        self, x: torch.Tensor, return_final_feats: bool=True
     ) -> torch.Tensor:
         x = self.conv_layers(x)
         x = torch.flatten(x, start_dim=1)
