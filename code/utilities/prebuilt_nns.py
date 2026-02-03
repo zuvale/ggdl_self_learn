@@ -7,6 +7,12 @@ class MNISTClassifier(cnn.CNN2DToFC):
     def forward(
         self, x: torch.Tensor, return_final_feats: bool=True
     ) -> torch.Tensor:
+        if x.dtype == torch.uint8:
+            x = x.float() / 255.0
+
+        p = next(self.parameters())
+        x = x.to(dtype=p.dtype, device=p.device)
+
         x = self.conv_layers(x)
         x = torch.flatten(x, start_dim=1)
         x_feats = self.fc_mapper(x)
