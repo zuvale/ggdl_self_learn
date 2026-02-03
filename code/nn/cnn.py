@@ -124,7 +124,9 @@ class CNN2DToFC(nn.Module):
         
         self.conv_layers = nn.Sequential(*conv_layers)
         final_numels = hidden_channels[-1] * n_feats_prime**2
-        self.fc_mapper = nn.Linear(final_numels, fc_in_size)
+        self.fc_mapper = nn.Sequential(
+            *[nn.Linear(final_numels, fc_in_size), act_fun()]
+        )
         self.fc_head = fc_head
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
