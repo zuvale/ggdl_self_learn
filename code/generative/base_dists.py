@@ -7,7 +7,7 @@ from typing import Tuple
 class GaussianBase(nn.Module):
     normalization_constant = 0.5 * torch.log(
         torch.Tensor([2 * torch.pi]))
-    def __init__(self, dimensionality: Tuple) -> None:
+    def __init__(self, dimensionality: Tuple[int]) -> None:
         super().__init__()
 
         self.dim = dimensionality
