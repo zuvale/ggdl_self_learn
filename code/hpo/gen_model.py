@@ -59,19 +59,20 @@ class DiffusionSearchProblem(Problem):
             
             self.training_loop(model, optimizer, scheduler)
 
-            obj_val = self.evaluate(model)
-
-            # clean up the GPU memory since the model is not needed anymore
-            del model
-            import gc
-            gc.collect()
-            torch.cuda.empty_cache() 
-
-            return obj_val
-
         except:
             print("bad initialization!")
             return 1000000.
+
+        obj_val = self.evaluate(model)
+        print(f"objective value: {obj_val:.4f}")
+
+        # clean up the GPU memory since the model is not needed anymore
+        del model
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache() 
+
+        return obj_val
 
     def training_loop(self, model: nn.Module, optimizer, scheduler) -> None:
         return NotImplementedError
