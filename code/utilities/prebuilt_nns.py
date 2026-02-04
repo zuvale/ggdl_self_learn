@@ -1,4 +1,4 @@
-from nn import mlp, cnn
+from nn_ import mlp, cnn
 import torch
 import torch.nn as nn
 

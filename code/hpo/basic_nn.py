@@ -1,7 +1,7 @@
 from mealpy import Problem, FloatVar, IntegerVar, StringVar, MixedSetVar
 import torch.nn as nn
 from typing import Iterable
-from nn.cnn import UNet
+from nn_.cnn import UNet
 from generative.conditioning import UNetTimeDependent, UNetTimeClassDependent
 from .utils import powers_of_2
 

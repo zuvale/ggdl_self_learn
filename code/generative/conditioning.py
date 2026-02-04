@@ -2,9 +2,9 @@ from copy import deepcopy
 import torch
 import torch.nn as nn
 from typing import List
-from nn.mlp import MLP
-from nn.cnn import UNet
-from nn.embedding import SinusoidalPE, ClassEmbedding
+from nn_.mlp import MLP
+from nn_.cnn import UNet
+from nn_.embedding import SinusoidalPE, ClassEmbedding
 
 
 class FiLMedNetwork(nn.Module):
