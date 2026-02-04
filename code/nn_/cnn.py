@@ -47,7 +47,7 @@ class Conv2DLayer(nn.Module):
 
         self.skip_flag = skip
     
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
         x_out = self.conv2d_layer(x)
         if self.skip_flag:
             return x + x_out
@@ -129,7 +129,7 @@ class CNN2DToFC(nn.Module):
         )
         self.fc_head = fc_head
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
         x = self.conv_layers(x)
         x = torch.flatten(x, start_dim=1)
         x = self.fc_mapper(x)

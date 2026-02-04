@@ -66,5 +66,5 @@ class MLP(nn.Module):
         
         self.network = nn.Sequential(*fc_block_list)
     
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
         return self.network(x)
