@@ -5,7 +5,7 @@ different model architectures, approaches, etc. relevant for my research.
   
 The models and other things implemented here are for educational purposes mostly. 
 In other words
-- Most of the code will be unoptimized, although I attempt to avoid or overcome fullz naive implementations of different mathematical transformations or architectures.
+- Most of the code will be unoptimized, although I attempt to avoid or overcome fully naive implementations of different mathematical transformations or architectures.
 - The code is based on a personal understanding and interpretation of the underlying papers/research, aided by ChatBots. As such, it is likely there might be some mistakes here and there as I do not have a formal math background.
   
 ## Content
