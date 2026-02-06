@@ -2,7 +2,25 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.utils.parametrize as parametrize
+from typing import Tuple
 
+
+def tweedie_denoise(
+    model: nn.Module|nn.Sequential, x_noisy: torch.Tensor, y: torch.Tensor,
+    sigma: float, clamp: Tuple[float, float]|None=(-1.0, 1.0),
+    device: str="cpu"
+) -> torch.Tensor:
+    x_noisy = x_noisy.detach().requires_grad_(True).to(device)
+
+    z, log_dets = model(x_noisy, y=y)
+    log_p = model.base().log_prob(z) + log_dets
+    score = torch.autograd.grad(log_p.sum(), x_noisy, create_graph=False)[0]
+
+    x = x_noisy + sigma**2 * score
+    if clamp is not None:
+        x = x.clamp(clamp[0], clamp[1])
+    
+    return x.detach()
 
 class SoftPlusParameterization(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:

@@ -1,3 +1,6 @@
+## TO-DO:
+# - make refactor the FILMedCNN class with the FiLMedNetwork class to reduce
+#   boilerplate
 from copy import deepcopy
 import torch
 import torch.nn as nn
@@ -47,6 +50,86 @@ class FiLMedNetwork(nn.Module):
 
     def _get_embedding(self, c: torch.Tensor) -> torch.Tensor:
         return self.emb(c)
+    
+class FILMedCNN(nn.Module):
+    def __init__(
+        self, conv_net: nn.Module|nn.Sequential, n_classes: int,
+        condition_dim: int, input_dim: int, hidden_dim: int,
+        n_convs: int=4, act_fun=nn.ReLU
+    ) -> None:
+        super().__init__()
+
+        self.proj_in = nn.Conv2d(input_dim, hidden_dim, kernel_size=1)
+
+        nets = []
+        for _ in range(n_convs):
+            nets.append(deepcopy(conv_net))
+            if act_fun is not None:
+                nets.append(act_fun())
+        self.conv_net = nn.Sequential(*nets)
+        self.class_embed = nn.Parameter(
+            torch.randn(n_classes, condition_dim)*1e-2)
+        self.film = nn.Linear(condition_dim, 2*hidden_dim)
+        if act_fun is not None:
+            self.act_fun = act_fun()
+        else:
+            self.act_fun = None
+        
+        self.proj_out = nn.Conv2d(hidden_dim, 2*input_dim, kernel_size=1)
+        nn.init.zeros_(self.proj_out.weight)
+        nn.init.zeros_(self.proj_out.bias)
+        
+    def forward(
+        self, x: torch.Tensor, y: torch.Tensor|None=None) -> torch.Tensor:
+        # (batch_size, no_of_channels, height, width)
+        # -> (batch_size, hidden_channels, height, width)
+        x = self.proj_in(x)
+
+        # (batch_size, cond_dim)
+        if y is not None:
+            # if some classes are missing (e.g. for unconditional training
+            # with dropout)
+            if (y < 0).any():
+                m = (y < 0).float().view(-1, 1)
+                class_embed = (
+                    (1 - m) * self.class_embed[y]
+                        + m * (
+                            self.class_embed.mean(dim=0)
+                                .unsqueeze(0)
+                                .expand(x.size(0), -1)
+                        )
+                )
+            else:
+                class_embed = self.class_embed[y]
+            c = class_embed
+        else:
+            c = (
+                self.class_embed.mean(dim=0)
+                    .unsqueeze(0)
+                    .expand(x.size(0), -1)
+            )
+        
+        # 2 * (batch_size, hidden_channels)
+        gamma, beta = torch.chunk(self.film(c), 2, dim=-1)
+        if x.dim() == 4:
+            # 2 * (batch_size, hidden_channels, height, width)
+            gamma = gamma[:, :, None, None]
+            beta = beta[:, :, None, None]
+        else:
+            pass
+        # stabilize in case gamma is near 0
+        gamma = gamma + 1.0
+
+        # (batch_size, hidden_channels, height, width)
+        x = self.conv_net(x)
+        x = x*gamma + beta
+        if self.act_fun is not None:
+            x = self.act_fun(x)
+        # (batch_size, 2*no_of_channels, height, width)
+        x = self.proj_out(x)
+        
+        # 2 * (batch_size, hidden_channels, height, width)
+        return torch.chunk(x, 2, dim=1)
 
 class FiLMHybrid(FiLMedNetwork):
     """
