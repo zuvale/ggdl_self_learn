@@ -1,5 +1,6 @@
 ## TO-DO:
 # - reduce boilerplate in NFPatchified class
+# - condense the two ActNorm classes as they are almost the same
 import torch
 import torch.nn as nn
 from typing import Tuple
