@@ -1,5 +1,6 @@
 experiments/ml-tarflow
 experiments/iap-diffusion-labs
+experiments/aml_code
 data/MNIST
 **/__pycache__
 .vscode
