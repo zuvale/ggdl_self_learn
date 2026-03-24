@@ -288,7 +288,7 @@ class DDIMReverseProcess(DiffusionEpsilonParam):
         if show_path:
             z_ts = [z_t]
         
-        timegrid = torch.linspace(0.0, 1.0, self.T, device=z_ts[-1].device)
+        timegrid = torch.linspace(0.0, 1.0, self.T, device=z_t.device)
         if spacing == "uniform":
             Ts = self._make_ts_uniform(
                 self.noise_sched.alpha_bar_grid(timegrid), n_steps, start_time)
