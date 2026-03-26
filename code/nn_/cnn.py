@@ -156,6 +156,87 @@ class CNN2DToFC(nn.Module):
         w_prime = (w - k + 2*p)//s + 1
         return w_prime
 
+class TCNN2DFromFC(nn.Module):
+    def __init__(
+        self, n_feats: int, in_channels: int, out_channels: int,
+        hidden_channels: List[int],
+        # transpose convolution hyperparameters
+        tconv_kernel_sizes: List[int], tconv_stride_sizes: List[int],
+        tconv_in_paddings: List[int], tconv_out_paddings: List[int],
+        # mlp hyperparameters
+        fc_in_size: int, fc_out_size: int,
+        use_batchnorm: bool=False,
+        tconv_act_fun: nn.Module=nn.ReLU, fc_act_fun: nn.Module|None=None,
+        no_last_act_fun: bool=False
+    ) -> None:
+        super().__init__()
+
+        assert fc_out_size == in_channels * n_feats**2, (
+            f"Output size of fully-connected layer {fc_out_size} is not equal "
+            "to input dimensions of first transpose conv. layer "
+            f"{in_channels * n_feats**2}"
+        )
+
+        if fc_act_fun:
+            fc_map_net = nn.Sequential(
+                *[
+                    nn.Linear(fc_in_size, fc_out_size),
+                    fc_act_fun(),
+                    nn.Unflatten(-1, (in_channels, n_feats, n_feats))
+                ]
+            )
+        else:
+            fc_map_net = nn.Sequential(
+                *[
+                    nn.Linear(fc_in_size, fc_out_size),
+                    nn.Unflatten(-1, (in_channels, n_feats, n_feats))
+                ]
+            )
+        self.fc_mapper = fc_map_net
+
+        self.n_layers = len(hidden_channels)
+        if hidden_channels:
+            hidden_channels = [in_channels] + hidden_channels + [out_channels]
+        else:
+            hidden_channels = [in_channels, out_channels]
+        in_channels = hidden_channels[0:-1]
+        out_channels = hidden_channels[1:]
+
+        tconv_layers = []
+        n_feats_prime = n_feats
+        for i, (i_c, o_c, t_k, t_s, i_p, o_p) in enumerate(zip(
+            in_channels, out_channels,
+            tconv_kernel_sizes, tconv_stride_sizes, tconv_in_paddings,
+            tconv_out_paddings
+        )):
+            if no_last_act_fun and i == self.n_layers:
+                tconv_act_fun = None
+            tconv_layers.append(TransposeConv2DLayer(
+                i_c, o_c, t_k, i_p, o_p, t_s, act_fun=tconv_act_fun,
+                use_batchnorm=use_batchnorm
+            ))
+            n_feats_prime = self.get_tconv_out_size(
+                n_feats_prime, t_k, t_s, i_p, o_p)
+        
+        self.tconv_layers = nn.Sequential(*tconv_layers)
+    
+    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+        x = self.fc_mapper(x)
+        x = self.tconv_layers(x)
+        return x
+    
+    @staticmethod
+    def get_tconv_out_size(w: int, k: int, s: int, i_p: int, o_p: int) -> int:
+        """
+        w  : input size
+        k  : kernel size
+        s  : stride
+        i_p: input padding
+        o_p: output padding
+        """
+        w_prime = (w - 1)*s + k - 2*i_p + o_p + 1
+        return w_prime
+
 class UNet(nn.Module):
     def __init__(
         self, n_feats: int, n_channels: int, hidden_channels: List[int],
