@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 from typing import List
 from nn_.mlp import MLP
-from nn_.cnn import UNet
+from nn_.cnn import CNN2DToFC, TCNN2DFromFC, UNet
 from nn_.embedding import SinusoidalPE, ClassEmbedding
 
 
@@ -196,6 +196,92 @@ class MLPTimeDependent(MLP):
     def forward(self, x: torch.Tensor, t: torch.Tensor, **kwargs) -> torch.Tensor:
         for net in self.network:
             x = net(x, t)
+        return x
+
+class FiLMedCNN2DToFC(CNN2DToFC):
+    def __init__(
+        self, embedding_dim: int, n_classes: int, *args,
+        film_act_fun: nn.Module|None=nn.ReLU, **kwargs,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+
+        new_convs = []
+        for conv in self.conv_layers:
+            for _, l_params in conv.named_children():
+                for _, s_params in l_params.named_children():
+                    if "conv" in str(type(s_params)):
+                        new_convs.append(FiLMedNetwork(
+                            deepcopy(conv), ClassEmbedding(
+                                embedding_dim, n_classes),
+                            embedding_dim, s_params.out_channels,
+                            act_fun=film_act_fun
+                        ))
+        self.conv_layers = nn.ModuleList(new_convs)
+
+        new_mapper = []
+        for _,l in self.fc_mapper.named_children():
+            if isinstance(l, nn.modules.linear.Linear):
+                self.filmed_mapper = FiLMedNetwork(
+                    deepcopy(l), ClassEmbedding(embedding_dim, n_classes),
+                    embedding_dim, l.out_features, act_fun=film_act_fun
+                )
+            else:
+                new_mapper.append(l)
+    
+        self.fc_mapper = nn.Sequential(*new_mapper)
+    
+    def forward(
+        self, x: torch.Tensor, y: torch.Tensor|None=None) -> torch.Tensor:
+        for conv in self.conv_layers:
+            x = conv(x, y)
+        x = torch.flatten(x, start_dim=1)
+        x = self.filmed_mapper(x, y)
+        x = self.fc_mapper(x)
+        if self.fc_head:
+            x = self.fc_head(x)
+        return x
+
+class FiLMedTCNN2DFromFC(TCNN2DFromFC):
+    def __init__(
+        self, embedding_dim: int, n_classes: int, *args,
+        film_act_fun: nn.Module|None=nn.ReLU, **kwargs,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+
+        new_mapper = []
+        for _,l in self.fc_mapper.named_children():
+            if isinstance(l, nn.modules.linear.Linear):
+                self.filmed_mapper = FiLMedNetwork(
+                    deepcopy(l), ClassEmbedding(embedding_dim, n_classes),
+                    embedding_dim, l.out_features, act_fun=film_act_fun
+                )
+            else:
+                new_mapper.append(l)
+    
+        self.fc_mapper = nn.Sequential(*new_mapper)
+
+        new_tconvs = []
+        for j, tconv in enumerate(self.tconv_layers):
+            # make sure the old network is not output-clipped by an activation
+            # function
+            f_act_fun = film_act_fun if j < len(self.tconv_layers) - 1 else None
+            for _, l_params in tconv.named_children():
+                for _, s_params in l_params.named_children():
+                    if "Transpose" in str(type(s_params)):
+                        new_tconvs.append(FiLMedNetwork(
+                            deepcopy(tconv), ClassEmbedding(
+                                embedding_dim, n_classes),
+                            embedding_dim, s_params.out_channels,
+                            act_fun=f_act_fun
+                        ))
+        self.tconv_layers = nn.ModuleList(new_tconvs)
+    
+    def forward(
+        self, x: torch.Tensor, y: torch.Tensor|None=None) -> torch.Tensor:
+        x = self.filmed_mapper(x, y)
+        x = self.fc_mapper(x)
+        for tconv in self.tconv_layers:
+            x = tconv(x, y)
         return x
 
 class UNetTimeDependent(UNet):
