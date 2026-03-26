@@ -87,9 +87,9 @@ class CNN2DToFC(nn.Module):
         conv_paddings: List[int], pool_kernel_sizes: List[int],
         pool_stride_sizes: List[int], pool_padding_sizes: List[int],
         # mlp hyperparameters
-        fc_head: nn.Module, fc_in_size: int,
-        pool: str="max",
-        act_fun: nn.Module=nn.ReLU
+        fc_head: nn.Module|None, fc_in_size: int,
+        pool: str="max", use_batchnorm: bool=False,
+        conv_act_fun: nn.Module=nn.ReLU, fc_act_fun: nn.Module|None=None
     ) -> None:
         super().__init__()
 
@@ -103,14 +103,16 @@ class CNN2DToFC(nn.Module):
 
         conv_layers = []
         n_feats_prime = n_feats
-        for i_c, o_c, c_k, c_s, c_p, p_k, p_s, p_p in zip(
+        for i, (i_c, o_c, c_k, c_s, c_p, p_k, p_s, p_p) in enumerate(zip(
             in_channels, out_channels,
             conv_kernel_sizes, conv_stride_sizes, conv_paddings,
             pool_kernel_sizes, pool_stride_sizes, pool_padding_sizes,
-        ):
+        )):
+            if i == self.n_layers:
+                use_batchnorm = False
             conv_layers.append(Conv2DLayer(
-                i_c, o_c, c_k, c_p, c_s, pool=None, act_fun=act_fun,
-                act_fun_pos="after_conv"
+                i_c, o_c, c_k, c_p, c_s, pool=None, act_fun=conv_act_fun,
+                act_fun_pos="after_conv", use_batchnorm=use_batchnorm
             ))
             n_feats_prime = self.get_conv_pool_out_size(
                 n_feats_prime, c_k, c_p, c_s)
@@ -124,16 +126,23 @@ class CNN2DToFC(nn.Module):
         
         self.conv_layers = nn.Sequential(*conv_layers)
         final_numels = hidden_channels[-1] * n_feats_prime**2
-        self.fc_mapper = nn.Sequential(
-            *[nn.Linear(final_numels, fc_in_size), act_fun()]
-        )
+        if fc_act_fun:
+            fc_map_net = nn.Sequential(
+                *[nn.Linear(final_numels, fc_in_size), fc_act_fun()]
+            )
+        else:
+            fc_map_net = nn.Sequential(
+                *[nn.Linear(final_numels, fc_in_size)]
+            )
+        self.fc_mapper = fc_map_net
         self.fc_head = fc_head
 
     def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
         x = self.conv_layers(x)
         x = torch.flatten(x, start_dim=1)
         x = self.fc_mapper(x)
-        x = self.fc_head(x)
+        if self.fc_head:
+            x = self.fc_head(x)
         return x
     
     @staticmethod
