@@ -5,6 +5,21 @@ import torch.nn.utils.parametrize as parametrize
 from typing import Tuple
 
 
+def create_linear_schedule(
+    total_steps: int, start: int|float, end: int|float, burnin_frac: float=0.0,
+    ramp_frac: float=0.3, device: str="cpu"
+) -> torch.Tensor:
+    burnin_steps = int(total_steps * burnin_frac)
+    ramp_steps = max(1, int(total_steps * ramp_frac))
+    ceil_steps = max(0, total_steps - burnin_steps - ramp_steps)
+
+    return torch.cat([
+        torch.full((burnin_steps,), start, dtype=torch.float32, device=device),
+        torch.linspace(
+            start, end, ramp_steps, dtype=torch.float32, device=device),
+        torch.full((ceil_steps,), end, dtype=torch.float32, device=device)
+    ])
+
 def tweedie_denoise(
     model: nn.Module|nn.Sequential, x_noisy: torch.Tensor, y: torch.Tensor,
     sigma: float, clamp: Tuple[float, float]|None=(-1.0, 1.0),
