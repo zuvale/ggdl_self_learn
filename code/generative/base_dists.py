@@ -44,7 +44,8 @@ class VampBase(nn.Module):
     def __init__(
             self, dimensonality: Tuple[int], num_components: int,
             encoder: nn.Module|nn.Sequential, logit_init: float=3.0,
-            pseudo_init: float=1.0, unflatten_flag=False
+            pseudo_init: float=1.0, unflatten_flag=False,
+            n_classes: int=0
         ) -> None:
         super().__init__()
 
@@ -58,9 +59,19 @@ class VampBase(nn.Module):
             torch.ones(self.k) * logit_init, requires_grad=True)
         self.enc = encoder
         self.unflatten = unflatten_flag
+
+        if n_classes > 0:
+            labels = (
+                torch.arange(n_classes)
+                    .repeat((self.k + n_classes - 1)  // n_classes)
+                    [:num_components]
+            )
+            self.register_buffer("pseudo_labels", labels.long())
+        else:
+            self.pseudo_labels = None
     
     def forward(self) -> td.Distribution:
         mix_dist = td.Categorical(logits=self.mix_logits)
-        comp_dist = self.enc(self.pseudo_inputs)
+        comp_dist = self.enc(self.pseudo_inputs, self.pseudo_labels)
         
         return td.MixtureSameFamily(mix_dist, comp_dist)
