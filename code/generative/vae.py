@@ -98,10 +98,14 @@ class VAE(nn.Module):
 
     def sample(
         self, sample_shape: Tuple[int]|torch.Size=(1,),
-        y: torch.Tensor|None=None, **kwargs
+        y: torch.Tensor|None=None, use_mean: bool=False, **kwargs
     ) -> torch.Tensor:
         latent = self._prior_prep().sample(sample_shape)
-        return self.dec(latent, y=y).sample()
+        likelihood = self.dec(latent, y=y, **kwargs)
+        if not use_mean:
+            return likelihood.sample()
+        else:
+            return likelihood.mean
     
     def _prior_prep(self) -> td.Distribution:
         return self.prior()
