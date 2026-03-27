@@ -20,7 +20,8 @@ class GaussianBase(nn.Module):
 class MixtureOfGaussiansBase(nn.Module):
     def __init__(
         self, dimensionality: Tuple[int], num_components: int,
-        logit_init: float=3.0, logvar_init: float=-4.6
+        logit_init: float=3.0, logvar_init: float=-4.6,
+        logvar_bounds: Tuple[float, float]|None=None
     ) -> None:
         super().__init__()
 
@@ -30,15 +31,33 @@ class MixtureOfGaussiansBase(nn.Module):
             torch.ones(self.k) * logit_init, requires_grad=True)
         self.means = nn.Parameter(
             torch.randn(self.k, *self.dim), requires_grad=True)
-        self.logvars = nn.Parameter(torch.ones(self.k, *self.dim) * logvar_init)
+        self.logvars = nn.Parameter(
+            torch.ones(self.k, *self.dim) * logvar_init, requires_grad=True)
+        
+        if logvar_bounds:
+            self.logvar_bounding = True
+            self.logvar_min, self.logvar_max = logvar_bounds
+        else:
+            self.logvar_bounding = False
 
     def forward(self) -> td.Distribution:
         mix_dist = td.Categorical(logits=self.mix_logits)
+        if not self.logvar_bounding:
+            logvars = self.logvars
+        else:
+            logvars = self._bounded_logvars()
         comp_dist = td.Independent(
-            td.Normal(loc=self.means, scale=torch.exp(0.5 * self.logvars)),
+            td.Normal(loc=self.means, scale=torch.exp(0.5 * logvars)),
             reinterpreted_batch_ndims=1
         )
         return td.MixtureSameFamily(mix_dist, comp_dist)
+    
+    def _bounded_logvars(self) -> torch.Tensor:
+        return (
+            self.logvar_min
+                + (self.logvar_max - self.logvar_min)
+                * torch.sigmoid(self.logvars)
+        )
 
 class VampBase(nn.Module):
     def __init__(
