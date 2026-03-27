@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 ## TO-DO:
-# - make project directory dynamic
 # - put MNIST dataloaders in separate script
 from pathlib import Path
-PROJECT_DIR = Path("/home/alzub/projects/ggdl_self_learn")
+import sys
+
+PROJECT_DIR = Path(__file__).resolve().parents[2]
+CODE_DIR = PROJECT_DIR / "code"
+
+if str(CODE_DIR) not in sys.path:
+    sys.path.insert(0, str(CODE_DIR))
 
 
 if __name__ == "__main__":
