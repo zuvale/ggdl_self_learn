@@ -7,10 +7,11 @@ from typing import Dict, Iterable, Tuple
 from generative.base_dists import GaussianBase
 from generative.diffusion import (
     ConstantLinearSchedule, LearnableLinearSchedule,
-    DDPMReverseProcess, DDIMReverseProcess
+    DDPMReverseProcess, VDMReverseProcess
 )
+from generative.utils import LinearMonotonicNetwork
 from utilities.metrics import DiffusionBPDEvaluator
-from .basic_nn import create_unet
+from .basic_nn import create_unet, POWERS_OF_2
 from .utils import get_act_fun, get_optim
 
 
@@ -22,6 +23,12 @@ DIFFUSION_BOUNDS = [
             "relu", "relu6", "prelu", "rrelu", "selu", "silu", "gelu"),
         name="f_act_fun"
     )
+]
+
+VDM_DIFFUSION_BOUNDS = DIFFUSION_BOUNDS + [
+    FloatVar(lb=-30, ub=-0.1, name="gamma_min"),
+    FloatVar(lb=0.1, ub=30, name="gamma_max"),
+    MixedSetVar(valid_sets=POWERS_OF_2, name="gamma_hid_size")
 ]
 
 
@@ -44,12 +51,8 @@ class DiffusionSearchProblem(Problem):
         x_decoded = self.decode_solution(x)
 
         try:
-            model = DDPMReverseProcess(
-                GaussianBase(self.data_shape),
-                ConstantLinearSchedule(self.n_timesteps),
-                self._define_score_network(x_decoded),
-                self.n_timesteps
-            ).to(self.device)
+            model = self._define_diffusion_process(
+                self._define_score_network(x_decoded), x_decoded).to(self.device)
 
             optim_fun = get_optim(x_decoded["optim_fun"])
             optimizer = optim_fun(
@@ -79,6 +82,10 @@ class DiffusionSearchProblem(Problem):
     
     def evaluate(self, model: nn.Module) -> float:
         return NotImplementedError
+
+    def _define_diffusion_process(
+        self, score_net: nn.Module, hyperpars: Dict) -> nn.Module:
+        return NotImplementedError
     
     def _define_score_network(self, hyperpars: Dict) -> nn.Module:
         return NotImplementedError
@@ -100,6 +107,15 @@ class DiffusionMNISTSearchProblem(DiffusionSearchProblem):
             scheduler.step()
 
 class DDPMUNetMNISTSearchProblem(DiffusionMNISTSearchProblem):
+    def _define_diffusion_process(
+        self, score_net: nn.Module, hyperpars: Dict) -> nn.Module:
+        return DDPMReverseProcess(
+            GaussianBase(self.data_shape),
+            ConstantLinearSchedule(self.n_timesteps),
+            score_net,
+            self.n_timesteps
+        )
+
     def _define_score_network(self, hyperpars: Dict) -> nn.Module:
         return create_unet(
             1, self.data_shape[-1], [
@@ -137,3 +153,17 @@ class DDPMUNetMNISTSearchProblem(DiffusionMNISTSearchProblem):
         
         bpd /= len(self.test_loader)
         return bpd
+
+class VDMUNetMNISTSearchProblem(DDPMUNetMNISTSearchProblem):
+    def _define_diffusion_process(
+        self, score_net: nn.Module, hyperpars: Dict) -> nn.Module:
+        return VDMReverseProcess(
+            GaussianBase(self.data_shape),
+            LearnableLinearSchedule(
+                self.n_timesteps,
+                LinearMonotonicNetwork(1, hyperpars["gamma_hid_size"]),
+                gamma_limits=(hyperpars["gamma_min"], hyperpars["gamma_max"])
+            ),
+            score_net,
+            self.n_timesteps
+        )
