@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 # TO-DO:
-# - make project directory dynamic
 # - put MNIST dataloaders in separate script
 from pathlib import Path
-PROJECT_DIR = Path("/home/alzub/projects/ggdl_self_learn")
+import sys
+
+PROJECT_DIR = Path(__file__).resolve().parents[2]
+CODE_DIR = PROJECT_DIR / "code"
+
+if str(CODE_DIR) not in sys.path:
+    sys.path.insert(0, str(CODE_DIR))
 
 
 if __name__ == "__main__":
@@ -14,7 +19,10 @@ if __name__ == "__main__":
     import torch
     from torchvision import datasets, transforms
     from hpo.basic_nn import UNET_BOUNDS, OPTIM_BOUNDS
-    from hpo.gen_model import DIFFUSION_BOUNDS, DDPMUNetMNISTSearchProblem
+    from hpo.gen_model import (
+        DIFFUSION_BOUNDS, VDM_DIFFUSION_BOUNDS,
+        DDPMUNetMNISTSearchProblem, VDMUNetMNISTSearchProblem
+    )
 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -37,7 +45,7 @@ if __name__ == "__main__":
     )
     common_parser.add_argument(
         "-b", "--batch-size", type=int, default=256,
-        help="batch size fpr dataloader (default: 256)"
+        help="batch size for dataloader (default: 256)"
     )
     common_parser.add_argument(
         "-t", "--no-of-timesteps", type=int, default=1000,
@@ -107,6 +115,13 @@ if __name__ == "__main__":
     if cli_args.noising_style == "ddpm":
         problem = DDPMUNetMNISTSearchProblem(
             bounds=UNET_BOUNDS + OPTIM_BOUNDS + DIFFUSION_BOUNDS,
+            data_shape=(1, 28, 28), train_loader=mnist_train_loader,
+            test_loader=mnist_test_loader, n_epochs=EPOCHS,
+            n_timesteps=TIMESTEPS, device=DEVICE
+        )
+    elif cli_args.noising_style == "vdm":
+        problem = VDMUNetMNISTSearchProblem(
+            bounds=UNET_BOUNDS + OPTIM_BOUNDS + VDM_DIFFUSION_BOUNDS,
             data_shape=(1, 28, 28), train_loader=mnist_train_loader,
             test_loader=mnist_test_loader, n_epochs=EPOCHS,
             n_timesteps=TIMESTEPS, device=DEVICE
