@@ -4,3 +4,4 @@ experiments/aml_code
 data/MNIST
 **/__pycache__
 .vscode
+.codex
