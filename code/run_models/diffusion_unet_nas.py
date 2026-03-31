@@ -3,6 +3,7 @@
 # - put MNIST dataloaders in separate script
 from pathlib import Path
 import sys
+from typing import List
 
 PROJECT_DIR = Path(__file__).resolve().parents[2]
 CODE_DIR = PROJECT_DIR / "code"
@@ -55,6 +56,10 @@ if __name__ == "__main__":
         "-s", "--random-seed", type=int, default=1,
         help="random seed used for Python, NumPy and PyTorch (default: 1)"
     )
+    common_parser.add_argument(
+        "--warm-start-file", type=str,
+        help="CSV file with a previous best solution used to seed the first population member"
+    )
     parser = argparse.ArgumentParser(
         prog="diffusion_unet_nas.py",
         description="perform a naive neural architecture search of a diffusion model configuration using metaheuristic optimization",
@@ -88,9 +93,55 @@ if __name__ == "__main__":
     BATCH_SIZE = cli_args.batch_size
     TIMESTEPS = cli_args.no_of_timesteps
     SEED = cli_args.random_seed
+    WARM_START_FILE = (
+        None
+        if cli_args.warm_start_file is None
+        else Path(cli_args.warm_start_file)
+    )
 
     random.seed(SEED)
     torch.manual_seed(SEED)
+
+    def build_starting_solutions(
+        problem, pop_size: int, warm_start_file: Path
+    ) -> List:
+        import numpy as np
+
+
+        if not warm_start_file.is_file():
+            raise FileNotFoundError(
+                f"Warm-start file not found: {warm_start_file}"
+            )
+
+        prior_best = pd.read_csv(warm_start_file)
+        prior_best = prior_best.loc[
+            :, ~prior_best.columns.astype(str).str.startswith("Unnamed:")
+        ]
+        prior_best = prior_best.iloc[0].to_dict()
+
+        # Start from a valid random candidate so any VDM-only fields that are
+        # missing from a DDPM run still get sensible values.
+        seeded_candidate = {
+            bound.name: value
+            for bound, value in zip(
+                problem.bounds, problem.generate_solution(encoded=False)
+            )
+        }
+        seeded_candidate.update({
+            bound.name: prior_best[bound.name]
+            for bound in problem.bounds if bound.name in prior_best
+        })
+
+        ordered_candidate = [
+            v if isinstance(v, (list, tuple, np.ndarray)) else [v]
+            for v in (seeded_candidate[bound.name] for bound in problem.bounds)
+        ]
+        seeded_solution = problem.correct_solution(
+            problem.encode_solution(ordered_candidate)
+        )
+        return [seeded_solution] + [
+            problem.generate_solution() for _ in range(pop_size - 1)
+        ]
 
 
     mnist_train_loader = torch.utils.data.DataLoader(
@@ -128,11 +179,18 @@ if __name__ == "__main__":
         )
     
     optimizer_hpo = L_SHADE(epoch=GENERATIONS, pop_size=POP_SIZE)
-    optimizer_hpo.solve(problem, seed=SEED)
+    starting_solutions = None
+    if WARM_START_FILE is not None:
+        problem.set_seed(SEED)
+        starting_solutions = build_starting_solutions(
+            problem, POP_SIZE, WARM_START_FILE)
+
+    optimizer_hpo.solve(
+        problem, seed=SEED, starting_solutions=starting_solutions)
 
     best_hyperpars = optimizer_hpo.problem.decode_solution(
         optimizer_hpo.g_best.solution)
     print(best_hyperpars)
     best_hyperpar_df = pd.DataFrame(
         {k: [v] for k, v in best_hyperpars.items()})
-    best_hyperpar_df.to_csv(OUTPUT_FILE)
+    best_hyperpar_df.to_csv(OUTPUT_FILE, index=False)
