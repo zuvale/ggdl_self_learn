@@ -1,0 +1,2 @@
+n_hidden_layers,hid_chan_size_1,hid_chan_size_2,hid_chan_size_3,hid_chan_size_4,hid_chan_size_5,hid_chan_size_6,hid_chan_size_7,conv_kernel_size,pool_kernel_size,pool_stride_size,pool_pad_size_1,pool_pad_size_2,pool_pad_size_3,pool_pad_size_4,pool_pad_size_5,pool_pad_size_6,pool_pad_size_7,tconv_kernel_size,u_act_fun,learning_rate,optim_fun,gamma,time_emb_size,class_emb_size,f_act_fun,gamma_min,gamma_max,gamma_hid_size
+2,32,4,8,4,2,8,4,3,2,2,1,0,0,0,0,0,0,3,prelu,0.006427229766856638,adam,0.9614672903980809,109,253,relu,-11.565422233498785,15.237848196585631,2
