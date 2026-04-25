@@ -7,7 +7,8 @@ import torch.nn as nn
 from typing import List
 from nn_.mlp import MLP
 from nn_.cnn import CNN2DToFC, TCNN2DFromFC, UNet
-from nn_.embedding import SinusoidalPE, ClassEmbedding
+from nn_.embedding import (
+    DiscreteSinusoidalPE, ContinuousSinusoidalPE, ClassEmbedding)
 
 
 class FiLMedNetwork(nn.Module):
@@ -166,6 +167,7 @@ class MLPTimeDependent(MLP):
     """
     def __init__(
         self, n_timesteps: int, embedding_dim: int, *args,
+        continuous: bool=False, time_scale: float=1.0,
         mlp_act_funs: List[nn.Module|None]|nn.Module|None=nn.ReLU,
         film_act_fun: nn.Module|None=nn.ReLU,
         **kwargs
@@ -179,16 +181,16 @@ class MLPTimeDependent(MLP):
                     if "linear" in str(type(i_params)):
                         feature_dim = i_params.out_features
                 new_networks.append(FiLMedNetwork(
-                    deepcopy(s_params), SinusoidalPE(
-                        embedding_dim, n_timesteps), embedding_dim,
-                    feature_dim, act_fun=film_act_fun
+                    deepcopy(s_params), _make_time_embedding(
+                        continuous, embedding_dim, n_timesteps, time_scale),
+                    embedding_dim, feature_dim, act_fun=film_act_fun
                 ))
         # make sure the old network is not output-clipped by an activation
         # function
         new_networks[-1] = FiLMedNetwork(
-            deepcopy(s_params), SinusoidalPE(
-                embedding_dim, n_timesteps), embedding_dim,
-            feature_dim, act_fun=None
+            deepcopy(s_params), _make_time_embedding(
+                continuous, embedding_dim, n_timesteps, time_scale),
+            embedding_dim, feature_dim, act_fun=None
         )
         
         self.network = nn.ModuleList(new_networks)
@@ -287,6 +289,7 @@ class FiLMedTCNN2DFromFC(TCNN2DFromFC):
 class UNetTimeDependent(UNet):
     def __init__(
         self, n_timesteps: int, embedding_dim: int, *args,
+        continuous: bool=False, time_scale: float=1.0,
         unet_act_fun: nn.Module|None=nn.ReLU,
         film_act_fun: nn.Module|None=nn.ReLU,
         **kwargs
@@ -299,9 +302,10 @@ class UNetTimeDependent(UNet):
                 for _, s_params in l_params.named_children():
                     if "conv" in str(type(s_params)):
                         new_convs.append(FiLMedNetwork(
-                            deepcopy(conv), SinusoidalPE(
-                                embedding_dim, n_timesteps),
-                            embedding_dim, s_params.out_channels,
+                            deepcopy(conv), _make_time_embedding(
+                                continuous, embedding_dim, n_timesteps,
+                                time_scale
+                            ), embedding_dim, s_params.out_channels,
                             act_fun=film_act_fun
                         ))
         self.convs = nn.ModuleList(new_convs)
@@ -315,9 +319,10 @@ class UNetTimeDependent(UNet):
                 for _, s_params in l_params.named_children():
                     if "Transpose" in str(type(s_params)):
                         new_tconvs.append(FiLMedNetwork(
-                            deepcopy(tconv), SinusoidalPE(
-                                embedding_dim, n_timesteps),
-                            embedding_dim, s_params.out_channels,
+                            deepcopy(tconv), _make_time_embedding(
+                                continuous, embedding_dim, n_timesteps,
+                                time_scale
+                            ), embedding_dim, s_params.out_channels,
                             act_fun=f_act_fun
                         ))
         self.tconvs = nn.ModuleList(new_tconvs)
@@ -344,7 +349,7 @@ class UNetTimeDependent(UNet):
 class UNetTimeClassDependent(UNet):
     def __init__(
         self, n_timesteps: int, time_emb_dim: int, class_emb_dim,
-        n_classes: int, *args,
+        n_classes: int, *args, continuous: bool=False, time_scale: float=1.0,
         unet_act_fun: nn.Module|None=nn.ReLU,
         film_act_fun: nn.Module|None=nn.ReLU,
         **kwargs
@@ -357,9 +362,10 @@ class UNetTimeClassDependent(UNet):
                 for _, s_params in l_params.named_children():
                     if "conv" in str(type(s_params)):
                         new_convs.append(FiLMHybrid(
-                            deepcopy(conv), SinusoidalPE(
-                                time_emb_dim, n_timesteps),
-                            ClassEmbedding(class_emb_dim, n_classes),
+                            deepcopy(conv), _make_time_embedding(
+                                continuous, time_emb_dim, n_timesteps,
+                                time_scale
+                            ), ClassEmbedding(class_emb_dim, n_classes),
                             time_emb_dim, class_emb_dim, s_params.out_channels,
                             act_fun=film_act_fun
                         ))
@@ -374,9 +380,10 @@ class UNetTimeClassDependent(UNet):
                 for _, s_params in l_params.named_children():
                     if "Transpose" in str(type(s_params)):
                         new_tconvs.append(FiLMHybrid(
-                            deepcopy(tconv), SinusoidalPE(
-                                time_emb_dim, n_timesteps),
-                            ClassEmbedding(class_emb_dim, n_classes),
+                            deepcopy(tconv), _make_time_embedding(
+                                continuous, time_emb_dim, n_timesteps,
+                                time_scale
+                            ), ClassEmbedding(class_emb_dim, n_classes),
                             time_emb_dim, class_emb_dim, s_params.out_channels,
                             act_fun=f_act_fun
                         ))
@@ -401,3 +408,10 @@ class UNetTimeClassDependent(UNet):
             x = tconv(x, t, y)
         
         return x
+
+def _make_time_embedding(
+    cont_flag: bool, emb_dim: int, tsteps: int, tscale: float) -> nn.Module:
+    if cont_flag:
+        return ContinuousSinusoidalPE(emb_dim, time_scale=tscale)
+    else:
+        return DiscreteSinusoidalPE(emb_dim, tsteps)
