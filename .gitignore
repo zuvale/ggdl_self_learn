@@ -2,6 +2,7 @@ experiments/ml-tarflow
 experiments/iap-diffusion-labs
 experiments/aml_code
 data/MNIST
+data/MUTAG
 **/__pycache__
 .vscode
 .codex
