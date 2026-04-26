@@ -3,7 +3,7 @@ from rdkit import Chem
 import torch
 import torch.nn.functional as F
 from torch_geometric.data import Data
-from typing import List
+from typing import List, Callable
 
 
 TU_MUTAG_CONFIG = {
@@ -17,6 +17,18 @@ TU_MUTAG_CONFIG = {
     "aromatic_idx": 0,
     "max_n_atoms": 35
 }
+
+def create_processor_list(
+    atom_name_vocab: List[str], bond_name_vocab: List[str],
+    bond_type_vocab: List[Chem.rdchem.BondType], aromatic_idx: int,
+    max_n_atoms: int
+) -> List[Callable]:
+    kek_wrapper = lambda dat: kekulize_graph(
+        dat, atom_name_vocab, bond_name_vocab, bond_type_vocab, aromatic_idx)
+    pad_wrapper = lambda dat: pad_nodes_and_edges_to_max(dat, max_n_atoms)
+    trafos = [
+        kek_wrapper, pad_graph_w_none_tokens, pad_wrapper, convert_to_int]
+    return trafos
 
 def mol_from_graph(
     data: Data, atom_name_vocab: List[str],
