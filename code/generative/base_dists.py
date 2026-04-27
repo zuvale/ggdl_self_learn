@@ -2,9 +2,40 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributions as td
-from torch_geometric.data import InMemoryDataset
+from torch_geometric.data import InMemoryDataset, Data, Batch
 from typing import Tuple
 
+
+def graph_initial_samples(
+    base_dist: nn.Module, batch_size: int, max_n_nodes: int,
+    y: torch.Tensor|None=None, device: str="cpu"
+) -> Data:
+    data_list = []
+
+    row, col = torch.triu_indices(
+        max_n_nodes, max_n_nodes, offset=1, device=device)
+    triu_edge_index = torch.stack([row, col], dim=0)
+    num_edges = triu_edge_index.size(1)
+    edge_index = torch.cat(
+        [triu_edge_index, triu_edge_index.flip(0)], dim=1)
+
+    for i in range(batch_size):
+        x, upper_edge_attr = base_dist.sample(
+            node_sample_shape=(max_n_nodes,), edge_sample_shape=(num_edges,)
+        )
+        
+        edge_attr = torch.cat([upper_edge_attr, upper_edge_attr], dim=0)
+        data = Data(
+            x=x,
+            edge_index=edge_index.clone(),
+            edge_attr=edge_attr,
+            y=y[i].view(1) if y is not None else None,
+            num_nodes=max_n_nodes,
+        )
+
+        data_list.append(data)
+
+    return Batch.from_data_list(data_list).to(device)
 
 class GaussianBase(nn.Module):
     normalization_constant = 0.5 * torch.log(

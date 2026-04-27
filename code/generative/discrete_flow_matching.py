@@ -1,11 +1,11 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.data import Data, Batch
+from torch_geometric.data import Data
 from typing import List, Tuple, Callable
 
 from utilities.tensor_utils import broadcast_
-from .base_dists import DiscreteGraphBase
+from .base_dists import graph_initial_samples, DiscreteGraphBase
 from gnn_.utils import extract_triu_edge_data, mirror_triu_to_tril_again
 
 
@@ -170,7 +170,7 @@ class CTMCSampler(nn.Module):
         y: torch.Tensor|None=None, show_path: bool=False,
         t_eval: Tuple[int|float, int|float]=(0., 1.), **kwargs
     ) -> Data|List[Data]:
-        batch = self.initial_samples(
+        batch = graph_initial_samples(
             self.base, sample_shape[0], self.max_n_nodes, y=y,
             device=self.device
         )
@@ -256,38 +256,6 @@ class CTMCSampler(nn.Module):
         step_probs = step_probs / step_probs.sum(dim=-1, keepdim=True)
 
         return step_probs
-
-    @staticmethod
-    def initial_samples(
-        base_dist: nn.Module, batch_size: int, max_n_nodes: int,
-        y: torch.Tensor|None=None, device: str="cpu"
-    ) -> Data:
-        data_list = []
-
-        row, col = torch.triu_indices(
-            max_n_nodes, max_n_nodes, offset=1, device=device)
-        triu_edge_index = torch.stack([row, col], dim=0)
-        num_edges = triu_edge_index.size(1)
-        edge_index = torch.cat(
-            [triu_edge_index, triu_edge_index.flip(0)], dim=1)
-
-        for i in range(batch_size):
-            x, upper_edge_attr = base_dist.sample(
-                node_sample_shape=(max_n_nodes,), edge_sample_shape=(num_edges,)
-            )
-            
-            edge_attr = torch.cat([upper_edge_attr, upper_edge_attr], dim=0)
-            data = Data(
-                x=x,
-                edge_index=edge_index.clone(),
-                edge_attr=edge_attr,
-                y=y[i].view(1) if y is not None else None,
-                num_nodes=max_n_nodes,
-            )
-
-            data_list.append(data)
-
-        return Batch.from_data_list(data_list).to(device)
     
     @staticmethod
     def endpoint_sampling(
