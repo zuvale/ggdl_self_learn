@@ -228,3 +228,31 @@ def clean_up_graph(data: Data, max_n_atoms: int) -> Data:
             if k not in ("x", "edge_index", "edge_attr")
         }
     )
+
+def batch_to_mols(
+    batch: Data, atom_vocab: List[str],
+    bond_type_vocab: List[Chem.rdchem.BondType], max_n_atoms: int
+) -> List:
+    indv_graphs = []
+    edge_graph = batch.batch[batch.edge_index[0]]
+    for graph_idx in range(batch.num_graphs):
+        node_mask = batch.batch == graph_idx
+        edge_mask = edge_graph == graph_idx
+
+        x = batch.x[node_mask]
+        edge_index = batch.edge_index[:, edge_mask]
+        edge_attr = batch.edge_attr[edge_mask]
+
+        g = Data(
+            x=x, edge_index=edge_index - edge_index.min(),
+            edge_attr=edge_attr, y=batch.y[graph_idx]
+        )
+        indv_graphs.append(g)
+    
+    indv_mols = []
+    for g in indv_graphs:
+        g_clean = clean_up_graph(g, max_n_atoms)
+        mol = mol_from_graph(g_clean, atom_vocab, bond_type_vocab)
+        indv_mols.append(mol)
+    
+    return indv_mols
