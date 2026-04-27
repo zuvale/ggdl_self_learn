@@ -16,16 +16,21 @@ class GNNDenoiser(nn.Module):
         self, node_feat: int, edge_feat: int, node_hidden: int,
         edge_hidden: int, time_emb_dim: int,
         class_emb_dim: int, n_classes: int, n_layers: int=1,
-        updater_layers: int=2, updater_size: int=4,
+        updater_layers: int=2, updater_size: int=4, input_type: str="tokens",
         message_passing: str="gineconv", act_fun: nn.Module=nn.GELU,
         loader=None
     ) -> None:
         super().__init__()
 
         self.n_layers = n_layers
-    
-        self.node_emb = nn.Embedding(node_feat, node_hidden)
-        self.edge_emb = nn.Embedding(edge_feat, edge_hidden)
+
+        self.input_type = input_type
+        if self.input_type == "tokens":
+            self.node_emb = nn.Embedding(node_feat, node_hidden)
+            self.edge_emb = nn.Embedding(edge_feat, edge_hidden)
+        elif self.input_type == "probs":
+            self.node_proj_in = nn.Linear(node_feat, node_hidden)
+            self.edge_proj_in = nn.Linear(edge_feat, edge_hidden)
 
         self.mp_convolutions = nn.ModuleList()
         self.edge_mlps = nn.ModuleList()
@@ -88,9 +93,15 @@ class GNNDenoiser(nn.Module):
         row, col = e_idx
         upper_graph = batch.batch[row[row < col]]
 
-        # 1. Embed Tokens to Hidden Representation
-        hid_node = self.node_emb(self._as_token_ids(batch.x))
-        hid_edge = self.edge_emb(self._as_token_ids(batch.edge_attr))
+        # 1. Project Data
+        if self.input_type == "tokens":
+            # 1.A Embed Tokens to Hidden Representation
+            hid_node = self.node_emb(self._as_token_ids(batch.x))
+            hid_edge = self.edge_emb(self._as_token_ids(batch.edge_attr))
+        elif self.input_type == "probs":
+            # 1.B Project Probabilities to Hidden Representation
+            hid_node = self.node_proj_in(batch.x.float())
+            hid_edge = self.edge_proj_in(batch.edge_attr.float())
 
         # 2. Message-Passing/Updating and Modulation
         for k in range(self.n_layers):
