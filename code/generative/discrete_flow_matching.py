@@ -195,7 +195,7 @@ class CTMCSampler(nn.Module):
     def compute_step_probs(
         self, denoiser: nn.Module, batch: Data, t: torch.Tensor,
         h: torch.Tensor, bond_order_bias: Tuple[float, float, float]|None=None,
-        exit_cap: float|None=None
+        exit_cap: float|None=None, temp_scales: Tuple[float, float]=(1., 1.)
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         batch = batch.clone()
         e_idx, n_nodes = batch.edge_index, batch.num_nodes
@@ -210,8 +210,10 @@ class CTMCSampler(nn.Module):
             edge_logits[:, self.bond_types.index("triple")] += tpl_b
             edge_logits[:, self.bond_types.index("no_bond")] += ne_b
         triu_e_logits = extract_triu_edge_data(e_idx, edge_logits)
-        node_final, triu_e_final = self.hard_endpoint_sampling(
-            node_logits, triu_e_logits)
+        node_final, triu_e_final = self.endpoint_sampling(
+            node_logits, triu_e_logits, node_temp=temp_scales[0],
+            edge_temp=temp_scales[0]
+        )
         edge_final = mirror_triu_to_tril_again(
             e_idx, edge_logits.argmax(dim=1), triu_e_final, n_nodes)
         
@@ -288,13 +290,18 @@ class CTMCSampler(nn.Module):
         return Batch.from_data_list(data_list).to(device)
     
     @staticmethod
-    def hard_endpoint_sampling(
-        node_logits: torch.Tensor, edge_logits: torch.Tensor
+    def endpoint_sampling(
+        node_logits: torch.Tensor, edge_logits: torch.Tensor,
+        node_temp: float=1.0, edge_temp: float=1.0
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         node_final = (
-            torch.distributions.Categorical(logits=node_logits).sample())
+            torch.distributions.Categorical(logits=node_logits / node_temp)
+                .sample()
+        )
         edge_final = (
-            torch.distributions.Categorical(logits=edge_logits).sample())
+            torch.distributions.Categorical(logits=edge_logits / edge_temp)
+                .sample()
+        )
         
         return node_final, edge_final
 
@@ -362,10 +369,10 @@ class DeFoG(nn.Module):
         self, sample_shape=(1,), n_steps: int=100, y: torch.Tensor|None=None,
         show_path: bool=False,
         bond_order_bias: Tuple[float, float, float]=(0., 0., 0.),
-        exit_cap: float=0.5
+        exit_cap: float=0.5, temp_scales: Tuple[float, float]=(1., 1.)
     ) -> torch.Tensor|Tuple[torch.Tensor, torch.Tensor]:
         return self.sampler(
             self.denoiser, sample_shape, y=y, n_steps=n_steps,
             show_path=show_path, bond_order_bias=bond_order_bias,
-            exit_cap=exit_cap
+            exit_cap=exit_cap, temp_scales=temp_scales
         )
