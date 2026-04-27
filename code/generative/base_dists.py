@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.distributions as td
+from torch_geometric.data import InMemoryDataset
 from typing import Tuple
 
 
@@ -94,3 +96,71 @@ class VampBase(nn.Module):
         comp_dist = self.enc(self.pseudo_inputs, self.pseudo_labels)
         
         return td.MixtureSameFamily(mix_dist, comp_dist)
+
+class DiscreteGraphBase(nn.Module):
+    def __init__(self, dataset: InMemoryDataset, device: str="cpu") -> None:
+        super().__init__()
+        self.data = dataset
+        self.n_graphs = len(dataset)
+        self.device = device
+        
+        self.n_node_states = self.data.x.size(-1)
+        self.n_edge_states = self.data.edge_attr.size(-1)
+    
+    def forward(
+        self, return_dist: bool=False
+    ) -> Tuple[torch.Tensor|torch.Tensor]|Tuple[td.Distribution, td.Distribution]:
+        node_probs = self._make_node_base()
+        edge_probs = self._make_edge_base()
+        
+        if return_dist:
+            node_dist = td.Categorical(probs=node_probs)
+            edge_dist = td.Categorical(probs=edge_probs)
+            return node_dist, edge_dist
+
+        return node_probs, edge_probs
+    
+    def sample(
+        self, node_sample_shape: Tuple[int]=(1,),
+        edge_sample_shape: Tuple[int]=(1,), y: torch.Tensor|None=None,
+        to_one_hot: bool=True
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        node_dist, edge_dist = self(return_dist=True)
+        node_samples = node_dist.sample(node_sample_shape)
+        edge_samples = edge_dist.sample(edge_sample_shape)
+
+        if to_one_hot:
+            node_samples = F.one_hot(
+                node_samples, num_classes=self.n_node_states)
+            edge_samples = F.one_hot(
+                edge_samples, num_classes=self.n_edge_states)
+        
+        return node_samples, edge_samples
+    
+    def _make_node_base(self) -> torch.Tensor:
+        raise NotImplementedError
+    
+    def _make_edge_base(self) -> torch.Tensor:
+        raise NotImplementedError
+
+class UniformGraphBase(DiscreteGraphBase):
+    def _make_node_base(self) -> torch.Tensor:
+        n_states = self.n_node_states
+        return torch.tensor(
+            [1/n_states]*n_states, dtype=torch.float32, device=self.device)
+    
+    def _make_edge_base(self) -> torch.Tensor:
+        n_states = self.n_edge_states
+        return torch.tensor(
+            [1/n_states]*n_states, dtype=torch.float32, device=self.device)
+
+class MarginalGraphBase(DiscreteGraphBase):
+    def _make_node_base(self):
+        tokens = self.data.x.argmax(dim=-1)
+        counts = tokens.bincount(minlength=self.n_node_states).float() + 1.0
+        return counts / counts.sum()
+
+    def _make_edge_base(self):
+        tokens = self.data.edge_attr.argmax(dim=-1)
+        counts = tokens.bincount(minlength=self.n_edge_states).float() + 1.0
+        return counts / counts.sum()
