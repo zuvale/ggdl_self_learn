@@ -1,7 +1,12 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.distributions as td
-from typing import Tuple, Callable
+from torch_geometric.data import Data
+from typing import Tuple, Callable, List
+
+from .base_dists import graph_initial_samples
+from gnn_.utils import extract_triu_edge_data, mirror_triu_to_tril_again
 
 
 class ProbabilityPath(nn.Module):
@@ -82,6 +87,164 @@ class SqrtGaussianSchedule(nn.Module):
     def beta_dt(self, t: torch.Tensor) -> torch.Tensor:
         return -0.5 / torch.sqrt(torch.clamp(1 - t, min=self.eps))
 
+class CatFlowInterpolant(nn.Module):
+    def __init__(self, base_dist: nn.Module, max_n_nodes: int) -> None:
+        super().__init__()
+        self.base = base_dist
+        self.max_n_nodes = max_n_nodes
+    
+    def forward(self, batch: Data, t: torch.Tensor) -> Data:
+        base_batch = graph_initial_samples(
+            self.base, batch.num_graphs, self.max_n_nodes, batch.y,
+            device=batch.x.device
+        )
+
+        return self.interpolate(base_batch, batch, t)
+
+    @staticmethod
+    def interpolate(src_batch, tgt_batch, t: torch.Tensor) -> Data:
+        intpol_batch = tgt_batch.clone()
+
+        e_idx = intpol_batch.edge_index
+        row, col = e_idx
+        upper_graph = intpol_batch.batch[row[row < col]]
+        t_node, t_edge = t[intpol_batch.batch][:, None], t[upper_graph][:, None]
+
+        intpol_node = t_node * tgt_batch.x + (1 - t_node) * src_batch.x
+
+        triu_e_src = extract_triu_edge_data(e_idx, src_batch.edge_attr)
+        triu_e_tgt = extract_triu_edge_data(e_idx, tgt_batch.edge_attr)
+        triu_intpol_e = t_edge * triu_e_tgt + (1 - t_edge) * triu_e_src
+        intpol_edge = mirror_triu_to_tril_again(
+            e_idx, intpol_batch.edge_attr.float(), triu_intpol_e,
+            intpol_batch.num_nodes
+        )
+        
+        intpol_batch.x = intpol_node
+        intpol_batch.edge_attr = intpol_edge
+        return intpol_batch
+
+class CatFlowODESampler(nn.Module):
+    EPS: float=1e-8
+    def __init__(
+        self, base_dist: nn.Module, node_classes: int, edge_classes: int,
+        max_nodes: int, update_method: str="euler", device: str="cpu",
+        bond_types: List["str"]=["single", "double", "triple", "no_bond"]
+    ) -> None:
+        super().__init__()
+        self.base = base_dist
+
+        self.nc_nodes, self.nc_edges = node_classes, edge_classes
+        self.max_n_nodes = max_nodes
+
+        if update_method == "euler":
+            self.update_step = self.euler_step
+
+        self.device = device
+        self.bond_types = bond_types
+    
+    @torch.inference_mode
+    def forward(
+        self, denoiser: nn.Module,
+        sample_shape: Tuple[int]=(1,), n_steps: int=100,
+        y: torch.Tensor|None=None, show_path: bool=False,
+        t_eval: Tuple[int|float, int|float]=(0., 1.), **kwargs
+    ) -> Data|List[Data]:
+        batch = graph_initial_samples(
+            self.base, sample_shape[0], self.max_n_nodes, y=y,
+            device=self.device
+        )
+        if show_path:
+            path_samples = [batch]
+
+        t0, t_end = t_eval
+        t = torch.full((batch.num_graphs,), t0, device=self.device)
+        h = torch.full(
+            (batch.num_graphs,), (t_end - t0) / n_steps, device=self.device)
+        for k in range(n_steps):
+            batch, t = self.update_step(
+                denoiser, batch, t, h, self.compute_step_probs, **kwargs)
+            batch = self.normalize_simplex(batch, eps=self.EPS)
+            if show_path:
+                path_samples.append(self.discretize_graph_probs(
+                    batch, self.nc_nodes, self.nc_edges))
+        if show_path:
+            return path_samples
+        
+        return self.discretize_graph_probs(batch, self.nc_nodes, self.nc_edges)
+    
+    def compute_step_probs(
+        self, denoiser: nn.Module, batch: Data, t: torch.Tensor,
+        bond_order_bias: Tuple[float, float, float]|None=None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        node_logits, edge_logits = denoiser(batch, t)
+        if bond_order_bias:
+            dbl_b, tpl_b, ne_b = bond_order_bias
+            edge_logits[:, self.bond_types.index("double")] += dbl_b
+            edge_logits[:, self.bond_types.index("triple")] += tpl_b
+            edge_logits[:, self.bond_types.index("no_bond")] += ne_b
+        
+        return node_logits, edge_logits
+    
+    @staticmethod
+    def discretize_graph_probs(
+        batch: Data, nc_node: int, nc_edge: int) -> Data:
+        batch = batch.clone()
+
+        batch.x = batch.x.argmax(dim=1)
+        batch.edge_attr = batch.edge_attr.argmax(dim=1)
+        batch.x = F.one_hot(batch.x, num_classes=nc_node)
+        batch.edge_attr = F.one_hot(batch.edge_attr, num_classes=nc_edge)
+
+        return batch
+    
+    @staticmethod
+    def euler_step(
+        denoiser: nn.Module, batch: Data, t: torch.Tensor, h: torch.Tensor,
+        fun: Callable, eps=1e-3, **kwargs
+    ) -> Tuple[Data|torch.Tensor]:
+        batch = batch.clone()
+        e_idx, n_nodes = batch.edge_index, batch.num_nodes
+        row, col = e_idx
+        upper_graph = batch.batch[row[row < col]]
+        t_node, t_edge = t[batch.batch][:, None], t[upper_graph][:, None]
+        h_node, h_edge = h[batch.batch][:, None], h[upper_graph][:, None]
+
+        P_X, P_E = fun(denoiser, batch, t, **kwargs)
+        t = t + h
+
+        mu_X = F.softmax(P_X, dim=-1)
+        v_P = (mu_X - batch.x) / (1 - t_node).clamp_min(eps)
+
+        triu_P_E = extract_triu_edge_data(e_idx, P_E)
+        triu_e_attr = extract_triu_edge_data(e_idx, batch.edge_attr)
+        triu_mu_E = F.softmax(triu_P_E, dim=-1)
+        triu_v_E = (triu_mu_E - triu_e_attr) / (1 - t_edge).clamp_min(eps)
+        
+
+        batch.x = batch.x + h_node * v_P
+        triu_e_next = triu_e_attr + h_edge * triu_v_E
+        batch.edge_attr = mirror_triu_to_tril_again(
+            e_idx, batch.edge_attr.float(), triu_e_next, n_nodes)
+        return batch, t
+    
+    @staticmethod
+    def normalize_simplex(batch, eps: float=1e-8) -> Data:
+        batch = batch.clone()
+        e_idx, n_nodes = batch.edge_index, batch.num_nodes
+
+        x = batch.x.clamp_min(eps)
+        x = x / x.sum(dim=-1, keepdim=True)
+
+        triu_e_attr = extract_triu_edge_data(e_idx, batch.edge_attr)
+        triu_e_attr = triu_e_attr.clamp_min(eps)
+        triu_e_attr = triu_e_attr / triu_e_attr.sum(dim=-1, keepdim=True)
+        edge_attr = mirror_triu_to_tril_again(
+            e_idx, batch.edge_attr, triu_e_attr, n_nodes)
+        
+        batch.x, batch.edge_attr = x, edge_attr
+        return batch
+
 class FlowMatchingModel(nn.Module):
     def __init__(
         self, velocity_field: nn.Module, prob_path: nn.Module,
@@ -123,3 +286,50 @@ class FlowMatchingModel(nn.Module):
             return x_path[-1]
         else:
             return x_path, ts
+
+class CatFlow(nn.Module):
+    def __init__(
+        self, base_dist: nn.Module, interpolant: nn.Module,
+          denoiser: nn.Module, sampler: nn.Module, node_tokens: int,
+          edge_tokens: int, max_n_nodes: int=35
+    ) -> None:
+        super().__init__()
+
+        self.base = base_dist
+        self.interpolant = interpolant
+        self.denoiser = denoiser
+        self.sampler = sampler
+        self.node_tokens = node_tokens
+        self.edge_tolens = edge_tokens
+        self.max_n_nodes = max_n_nodes
+    
+    def forward(
+        self, batch: Data, edge_loss_weight: float=1.0,
+        edge_weights: torch.Tensor=torch.ones(4)
+    ) -> torch.Tensor:
+        t = torch.rand(len(batch), device=batch.x.device)
+        intpol_batch = self.interpolant(batch, t)
+
+        node_logits, edge_logits = self.denoiser(intpol_batch, t)
+
+        node_loss = F.cross_entropy(node_logits, batch.x.float())
+        edge_weights = edge_weights.to(batch.x.device)
+        triu_e_attr = extract_triu_edge_data(batch.edge_index, batch.edge_attr)
+        triu_e_logits = extract_triu_edge_data(batch.edge_index, edge_logits)
+        edge_loss = F.cross_entropy(
+            triu_e_logits, triu_e_attr.float(), weight=edge_weights)
+
+        loss = node_loss + edge_loss_weight * edge_loss
+
+        return loss
+
+    @torch.inference_mode()
+    def sample(
+        self, sample_shape=(1,), n_steps: int=100, y: torch.Tensor|None=None,
+        show_path: bool=False,
+        bond_order_bias: Tuple[float, float, float]=(0., 0., 0.),
+    ) -> torch.Tensor|Tuple[torch.Tensor, torch.Tensor]:
+        return self.sampler(
+            self.denoiser, sample_shape, y=y, n_steps=n_steps,
+            show_path=show_path, bond_order_bias=bond_order_bias
+        )
