@@ -160,7 +160,6 @@ class CTMCSampler(nn.Module):
                 d, b, t, h, u, self.nc_nodes, self.nc_edges, **kwargs)
         
         self.device = device
-
         self.bond_types = bond_types
     
     @torch.inference_mode
@@ -277,7 +276,7 @@ class CTMCSampler(nn.Module):
     def euler_step(
         denoiser: nn.Module, batch: Data, t: torch.Tensor, h: torch.Tensor,
         fun: Callable, nc_node: int, nc_edge: int, **kwargs
-    ) -> Tuple[torch.Tensor|torch.Tensor]:
+    ) -> Tuple[Data|torch.Tensor]:
         batch = batch.clone()
         e_idx, n_nodes = batch.edge_index, batch.num_nodes
 
