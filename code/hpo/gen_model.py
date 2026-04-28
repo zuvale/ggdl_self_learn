@@ -213,54 +213,58 @@ class DeFoGMolSearchProblem(Problem):
     def obj_func(self, x: ndarray) -> float:
         x_decoded = self.decode_solution(x)
         
-        base_dist = MarginalGraphBase(self.data_set, device=self.device)
-        noiser = LinearDiscreteNoiser(base_dist)
-        
-        base_dist = MarginalGraphBase(self.data_set, device=self.device)
-        noiser = LinearDiscreteNoiser(base_dist)
-        n_atom_tokens, n_bond_tokens = 8, 4
-        node_hidden_size, edge_hidden_size = x_decoded["node_hidden"], x_decoded["edge_hidden"]
-        time_emb_size, class_emb_size = x_decoded["time_emb_size"], x_decoded["class_emb_size"]
-        n_classes = 2
-        n_update = x_decoded["n_layers"]
-        denoiser = GNNDenoiser(
-            n_atom_tokens, n_bond_tokens, node_hidden_size, edge_hidden_size,
-            time_emb_size, class_emb_size, n_classes, n_update,
-            message_passing="pna_conv", loader=self.data_loader
-        ).to(self.device)
-        sampler = CTMCSampler(
-            base_dist, LinearDiscreteRateMatrix(
-                base_dist, n_atom_tokens, n_bond_tokens).to(self.device),
-            n_atom_tokens, n_bond_tokens, TU_MUTAG_CONFIG["max_n_atoms"],
-            device=self.device
-        )
-        model = DeFoG(
-            base_dist, noiser, denoiser, sampler, n_atom_tokens, n_bond_tokens,
-            TU_MUTAG_CONFIG["max_n_atoms"]
-        ).to(self.device)
+        n_rep = 3
+        valid_connected = 0
+        mean_size = 0
+        target_size = 15
+        ring_ratio = 0
+        for i in range(n_rep):
+            base_dist = MarginalGraphBase(self.data_set, device=self.device)
+            noiser = LinearDiscreteNoiser(base_dist)
+            
+            base_dist = MarginalGraphBase(self.data_set, device=self.device)
+            noiser = LinearDiscreteNoiser(base_dist)
+            n_atom_tokens, n_bond_tokens = 8, 4
+            node_hidden_size, edge_hidden_size = x_decoded["node_hidden"], x_decoded["edge_hidden"]
+            time_emb_size, class_emb_size = x_decoded["time_emb_size"], x_decoded["class_emb_size"]
+            n_classes = 2
+            n_update = x_decoded["n_layers"]
+            denoiser = GNNDenoiser(
+                n_atom_tokens, n_bond_tokens, node_hidden_size, edge_hidden_size,
+                time_emb_size, class_emb_size, n_classes, n_update,
+                message_passing="pna_conv", loader=self.data_loader
+            ).to(self.device)
+            sampler = CTMCSampler(
+                base_dist, LinearDiscreteRateMatrix(
+                    base_dist, n_atom_tokens, n_bond_tokens).to(self.device),
+                n_atom_tokens, n_bond_tokens, TU_MUTAG_CONFIG["max_n_atoms"],
+                device=self.device
+            )
+            model = DeFoG(
+                base_dist, noiser, denoiser, sampler, n_atom_tokens, n_bond_tokens,
+                TU_MUTAG_CONFIG["max_n_atoms"]
+            ).to(self.device)
 
-        lambda_ = x_decoded["lambda_eloss"]
-        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-        model.train()
-        epochs = self.n_epochs
+            lambda_ = x_decoded["lambda_eloss"]
+            optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+            model.train()
+            epochs = self.n_epochs
 
-        for epoch in range(epochs):
-            for batch in self.data_loader:
-                optimizer.zero_grad()
+            for epoch in range(epochs):
+                for batch in self.data_loader:
+                    optimizer.zero_grad()
 
-                loss = model(
-                    batch, edge_loss_weight=lambda_,
-                    edge_weights=torch.tensor([
-                        1.0, x_decoded["dbl_weight"],
-                        x_decoded["tpl_weight"], x_decoded["ne_weight"]
-                    ])
-                )
+                    loss = model(
+                        batch, edge_loss_weight=lambda_,
+                        edge_weights=torch.tensor([
+                            1.0, x_decoded["dbl_weight"],
+                            x_decoded["tpl_weight"], x_decoded["ne_weight"]
+                        ])
+                    )
 
-                loss.backward()
-                optimizer.step()
+                    loss.backward()
+                    optimizer.step()
 
-        fc_val_ratio = 0
-        for i in range(10):
             with torch.inference_mode():
                 model.eval()
                 n_samples = 100
@@ -292,21 +296,36 @@ class DeFoGMolSearchProblem(Problem):
                 TU_MUTAG_CONFIG["max_n_atoms"]
             )
 
-            fc_val = 0
+            del model
+            import gc
+            gc.collect()
+            torch.cuda.empty_cache() 
+
+            fcv = 0
+            fcv_size = 0
+            rc = 0
             with rdBase.BlockLogs():
                 for mol in sampled_mols:
                     try:
                         mol_val = fix_nitro_charges(mol)
                         if "." not in Chem.MolToSmiles(mol_val):
-                            fc_val += 1
+                            fcv += mol_val.GetNumAtoms(onlyExplicit=True)
+                            fcv += 1
+
+                            if mol_val.GetRingInfo().NumRings() > 0:
+                                rc += 1
                     except:
                         pass
-            fc_val_ratio += fc_val / n_samples
-        fc_val_ratio /= 10
+            valid_connected += fcv / n_samples
+            mean_size += fcv_size / max(fcv, 1)
+            ring_ratio += rc / max(fcv, 1)
 
-        del model
-        import gc
-        gc.collect()
-        torch.cuda.empty_cache() 
+            size_score = min(mean_size / target_size, 1.0)
+            score = (
+                0.55 * valid_connected
+                + 0.25 * size_score
+                + 0.20 * ring_ratio
+            )
 
-        return 1. - fc_val_ratio
+        obj_val = 1.0 - (score / n_rep)
+        return obj_val
