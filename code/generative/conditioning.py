@@ -51,6 +51,27 @@ class FiLMedNetwork(nn.Module):
 
     def _get_embedding(self, c: torch.Tensor) -> torch.Tensor:
         return self.emb(c)
+
+class FiLMedMultipleNetwork(FiLMedNetwork):
+    def __init__(
+        self, network: nn.Module|nn.Sequential, embedding_dim: int,
+        feature_dim: int, *embeddings: nn.Module|nn.Sequential,
+        act_fun: nn.Module|None=nn.ReLU
+    ) -> None:
+        super().__init__(
+            network, embeddings[0], embedding_dim, feature_dim,
+            act_fun=act_fun
+        )
+        self.embs = nn.ModuleList(embeddings)
+        self.mod_map = nn.Linear(embedding_dim*2, embedding_dim)
+    
+    def _get_embedding(
+        self, *conditions: torch.Tensor, cat_dim: int=1) -> torch.Tensor:
+        embs = []
+        for i, c in enumerate(conditions):
+            embs.append(self.embs[i](c))
+        
+        return self.mod_map(torch.cat(embs, dim=cat_dim))
     
 class FILMedCNN(nn.Module):
     def __init__(
@@ -161,13 +182,49 @@ class FiLMHybrid(FiLMedNetwork):
         c = torch.cat([cont_emb, class_emb], dim=cat_dim)
         return self.mod_map(c)
 
+class FiLMHybrid2(FiLMedNetwork):
+    """
+    Rework class a bit regarding embedding dim's and so on.
+    """
+    def __init__(
+        self, network: nn.Module|nn.Sequential, feature_dim: int,
+        class_emb_dim: int, cont_emb_dim: int,
+        class_embedding: nn.Module|nn.Sequential,
+        *continuous_embeddings: nn.Module|nn.Sequential,
+         act_fun: nn.Module|None=nn.ReLU
+    ) -> None:
+        super().__init__(
+            network, class_embedding, class_emb_dim, feature_dim,
+            act_fun=act_fun
+        )
+
+        self.class_emb = class_embedding
+        self.cont_embs = nn.ModuleList(continuous_embeddings)
+        input_size = sum(
+            [class_emb_dim] + [cont_emb_dim] * len(continuous_embeddings))
+        self.mod_map = nn.Linear(input_size, class_emb_dim)
+    
+    def _get_embedding(
+        self, *cont_vars: torch.Tensor, y: torch.Tensor|None=None,
+        cat_dim: int=1
+    ) -> torch.Tensor:
+        cont_embs = []
+        for i, cv in enumerate(cont_vars):
+            cont_embs.append(self.cont_embs[i](cv))
+        class_emb = self.class_emb(y)
+        if class_emb.size(0) != cont_embs[0].size(0):
+            class_emb = class_emb.expand(
+                (cont_embs[0].size(0), class_emb.size(1)))
+        c = torch.cat(*cont_embs + [class_emb], dim=cat_dim)
+        return self.mod_map(c)
+
 class MLPTimeDependent(MLP):
     """
     TO-DO: Find a better solution than to overwrite the last layer again...
     """
     def __init__(
         self, n_timesteps: int, embedding_dim: int, *args,
-        continuous: bool=False, time_scale: float=1.0,
+        continuous: bool=False, time_scale: float=1.0, n_vars: int=1,
         mlp_act_funs: List[nn.Module|None]|nn.Module|None=nn.ReLU,
         film_act_fun: nn.Module|None=nn.ReLU,
         **kwargs
@@ -180,25 +237,43 @@ class MLPTimeDependent(MLP):
                 for _, i_params in s_params.named_children():
                     if "linear" in str(type(i_params)):
                         feature_dim = i_params.out_features
-                new_networks.append(FiLMedNetwork(
-                    deepcopy(s_params), _make_time_embedding(
-                        continuous, embedding_dim, n_timesteps, time_scale),
-                    embedding_dim, feature_dim, act_fun=film_act_fun
+                new_networks.append(self._film_network(
+                    s_params, continuous, feature_dim, embedding_dim,
+                    n_timesteps, time_scale, film_act_fun, n_vars
                 ))
         # make sure the old network is not output-clipped by an activation
         # function
-        new_networks[-1] = FiLMedNetwork(
-            deepcopy(s_params), _make_time_embedding(
-                continuous, embedding_dim, n_timesteps, time_scale),
-            embedding_dim, feature_dim, act_fun=None
+        new_networks[-1] = self._film_network(
+            s_params, continuous, feature_dim, embedding_dim,
+            n_timesteps, time_scale, None, n_vars
         )
         
         self.network = nn.ModuleList(new_networks)
     
-    def forward(self, x: torch.Tensor, t: torch.Tensor, **kwargs) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, t: torch.Tensor, *args, **kwargs
+    ) -> torch.Tensor:
         for net in self.network:
-            x = net(x, t)
+            x = net(x, t, *args)
         return x
+    
+    def _film_network(
+        self, s_params, c_flag, feat_dim, emb_dim, n_t, t_scale, act_fun,
+        n_vars
+    ) -> nn.Module:
+        if n_vars == 1:
+            return FiLMedNetwork(
+                deepcopy(s_params), _make_time_embedding(
+                    c_flag, emb_dim, n_t, t_scale),
+                emb_dim, feat_dim, act_fun=act_fun
+            )
+        else:
+            return FiLMedMultipleNetwork(
+                deepcopy(s_params), emb_dim, feat_dim, _make_time_embedding(
+                    c_flag, emb_dim, n_t, t_scale), _make_time_embedding(
+                    c_flag, emb_dim, n_t, t_scale),
+                act_fun=act_fun
+            )
 
 class FiLMedCNN2DToFC(CNN2DToFC):
     def __init__(
@@ -390,12 +465,12 @@ class UNetTimeClassDependent(UNet):
         self.tconvs = nn.ModuleList(new_tconvs)
 
     def forward(
-        self, x: torch.Tensor, t: torch.Tensor, y: torch.Tensor|None=None,
-        cat_dim: int=1
+        self, x: torch.Tensor, t: torch.Tensor, *args,
+        y: torch.Tensor|None=None, cat_dim: int=1, **kwargs
     ) -> torch.Tensor:
         c_xs = []
         for i, (conv, pool) in enumerate(zip(self.convs, self.pools)):
-            x = conv(x, t, y)
+            x = conv(x, t, y, **args)
             if i < self.n_layers - 1:
                 # (B, C_in, H_in, W_in) -> (B, C_out, H_out, W_out)
                 c_xs.append(x)
@@ -405,7 +480,7 @@ class UNetTimeClassDependent(UNet):
             if j > 0:
                 # (B, 2*C_out, H_out, W_out) -> (B, C_in, H_in, W_in)
                 x = torch.cat((x, c_xs[-j]), dim=cat_dim)
-            x = tconv(x, t, y)
+            x = tconv(x, t, y, **args)
         
         return x
 
