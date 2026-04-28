@@ -172,6 +172,16 @@ class ODESampler(nn.Module):
         t = t + h
         return x, t
 
+class ShortcutODESampler(ODESampler):
+    @staticmethod
+    def euler_step(
+        velocity_field: nn.Module, x: torch.Tensor, t: torch.Tensor,
+        h: torch.Tensor, **kwargs
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        x = x + h * velocity_field(x, t, h, **kwargs)
+        t = t + h
+        return x, t
+
 class CatFlowODESampler(nn.Module):
     EPS: float=1e-8
     def __init__(
@@ -293,52 +303,6 @@ class CatFlowODESampler(nn.Module):
         batch.x, batch.edge_attr = x, edge_attr
         return batch
 
-class FlowMatchingModel_old(nn.Module):
-    def __init__(
-        self, velocity_field: nn.Module, prob_path: nn.Module,
-        base_dist: nn.Module, solver: None|Callable=None, device: str="cpu",
-        time_scale: Tuple[int|float, int|float]=(0., 1.)
-    ) -> None:
-        super().__init__()
-
-        self.device = device
-        self.p = base_dist.to(self.device)
-        self.vf = velocity_field
-        self.path = prob_path.to(self.device)
-        self.solver = solver
-        self.time_scale = time_scale
-    
-    def forward(
-        self, x1: torch.Tensor, y: torch.Tensor|None=None, **kwargs
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        t = torch.rand((x1.shape[0], 1), device=self.device)
-
-        cond_path_sample, cond_velocity_sample = self.path(t, x1, self.p())
-        velocity_prediction = self.vf(
-            cond_path_sample.to(self.device), t, y=y, **kwargs)
-
-        return velocity_prediction, cond_velocity_sample
-
-    @torch.inference_mode()
-    def sample(
-        self, sample_shape=(1,), n_steps: int=100, y: torch.Tensor|None=None,
-        show_path: bool=False, ode_solver: None|Callable=None, **kwargs
-    ) -> torch.Tensor|Tuple[torch.Tensor, torch.Tensor]:
-        x_init = self.p().sample(sample_shape)
-        solver = self.solver if not ode_solver else ode_solver
-
-        def vf_ode(x, t):
-            return self.vf(x, t, y=y, **kwargs)
-
-        x_path, ts = solver(
-            vf_ode, [self.time_scale[0],self.time_scale[1]], x_init, n_steps,
-            device=self.device
-        )
-        if not show_path:
-            return x_path[-1]
-        else:
-            return x_path, ts
-
 class FlowMatchingModel(nn.Module):
     def __init__(
         self, velocity_field: nn.Module, prob_path: nn.Module,
@@ -374,6 +338,88 @@ class FlowMatchingModel(nn.Module):
             self.vf, sample_shape, y=y, n_steps=n_steps,
             show_path=show_path, **kwargs
         )
+
+class ShortCutFM(FlowMatchingModel):
+    SHORTCUT_SIZES: List[float]=torch.tensor(
+        [1/128, 1/64, 1/32, 1/16, 1/8, 1/4, 1/2], dtype=torch.float32)
+
+    def forward(
+        self, x1: torch.Tensor, y: torch.Tensor|None=None,
+        consist_ratio: float=0.25, **kwargs
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        batch_size = x1.size(0)
+        fm_idx, consist_idx = self.split_batch_idxes(
+            batch_size, consist_ratio, device=x1.device)
+        x1_fm = x1[fm_idx]
+        x1_consist = x1[consist_idx]
+        if y is not None:
+            y_fm, y_consist = y[fm_idx], y[consist_idx]
+        else:
+            y_fm, y_consist = None, None
+
+        t_fm = torch.rand((len(fm_idx), 1), device=self.device)
+        h_fm = torch.zeros_like(t_fm)
+        t_consist, h_consist = self.sample_shortcut_t_h(
+            self.SHORTCUT_SIZES.to(x1.device), len(consist_idx))
+        
+
+        fm_path, fm_velocity = self.path(t_fm, x1_fm, self.base())
+        consist_path, consist_velocity = self.path(
+            t_consist, x1_consist, self.base())
+
+        fm_pred = self.vf(
+            fm_path.to(self.device), t_fm, h_fm, y=y_fm,
+            **kwargs
+        )
+        
+        bootstrap_1 = self.vf(
+            consist_path.to(self.device), t_consist, h_consist, y=y_consist,
+            **kwargs
+        )
+        bootstrap_step = consist_path + h_consist[:, None] * bootstrap_1
+        bootstrap_2 = self.vf(
+            bootstrap_step, t_consist + h_consist, h_consist, y=y_consist,
+            **kwargs
+        )
+        consist_velocity = (bootstrap_1 + bootstrap_2).detach() / 2
+        consist_pred = self.vf(
+            consist_path.to(self.device), t_consist, 2*h_consist, y=y_consist,
+            **kwargs
+        )
+        
+        pred = torch.cat((fm_pred, consist_pred), dim=0)
+        target = torch.cat((fm_velocity, consist_velocity), dim=0)
+        return pred, target
+    
+    @staticmethod
+    def sample_shortcut_t_h(
+        sc_sizes: torch.Tensor, batch_size: int
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        h_idx = torch.randint(
+            low=0, high=len(sc_sizes), size=(batch_size,),
+            device=sc_sizes.device
+        )
+        h = sc_sizes[h_idx]
+
+        n_intervals = torch.round((1.0 - 2.0 * h) / h).long() + 1
+        k = (
+            torch.rand(batch_size, device=sc_sizes.device) * n_intervals
+        ).long()
+        t = k.float() * h
+
+        return t, h
+
+    @staticmethod
+    def split_batch_idxes(
+        batch_size: int, consist_ratio: int, device: str="cpu"
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        n_consist = int(round(consist_ratio * batch_size))
+
+        perm = torch.randperm(batch_size, device=device)
+        fm_idx = perm[n_consist:]
+        consist_idx = perm[:n_consist]
+
+        return fm_idx, consist_idx
 
 class CatFlow(nn.Module):
     def __init__(
