@@ -5,6 +5,7 @@ import torch.distributions as td
 from torch_geometric.data import Data
 from typing import Tuple, Callable, List
 
+from utilities.tensor_utils import broadcast_
 from .base_dists import graph_initial_samples
 from gnn_.utils import extract_triu_edge_data, mirror_triu_to_tril_again
 
@@ -45,7 +46,7 @@ class GaussianProbabilityPath(ProbabilityPath):
     def __init__(self, schedule: nn.Module):
         super().__init__()
         self.schedule = schedule
-    
+
     def forward(
         self, t: torch.Tensor, x1: torch.Tensor, base_dist: td.Distribution,
         **kwargs
@@ -123,6 +124,53 @@ class CatFlowInterpolant(nn.Module):
         intpol_batch.x = intpol_node
         intpol_batch.edge_attr = intpol_edge
         return intpol_batch
+
+class ODESampler(nn.Module):
+    def __init__(
+        self, base_dist: nn.Module, update_method: str="euler",
+        device: str="cpu"
+    ) -> None:
+        super().__init__()
+        self.base = base_dist
+
+        if update_method == "euler":
+            self.update_step = self.euler_step
+        
+        self.device = device
+
+    @torch.inference_mode
+    def forward(
+        self, velocity_field: nn.Module,
+        sample_shape: Tuple[int]=(1,), n_steps: int=100,
+        y: torch.Tensor|None=None, show_path: bool=False,
+        t_eval: Tuple[int|float, int|float]=(0., 1.), **kwargs
+    ) -> torch.Tensor|List[torch.Tensor]:
+        x = self.base().sample(sample_shape)
+        if show_path:
+            path_samples = [x]
+
+        t0, t_end = t_eval
+        t = torch.full(sample_shape, t0, device=self.device)
+        h = torch.full(
+            sample_shape, (t_end - t0) / n_steps, device=self.device)
+        t, h = broadcast_(t, x), broadcast_(h, x)
+        for k in range(n_steps):
+            x, t = self.update_step(velocity_field, x, t, h, y=y, **kwargs)
+            if show_path:
+                path_samples.append(x)
+
+        if show_path:
+            return torch.stack(path_samples, dim=0)
+        return x
+    
+    @staticmethod
+    def euler_step(
+        velocity_field: nn.Module, x: torch.Tensor, t: torch.Tensor,
+        h: torch.Tensor, **kwargs
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        x = x + h * velocity_field(x, t, **kwargs)
+        t = t + h
+        return x, t
 
 class CatFlowODESampler(nn.Module):
     EPS: float=1e-8
@@ -245,10 +293,11 @@ class CatFlowODESampler(nn.Module):
         batch.x, batch.edge_attr = x, edge_attr
         return batch
 
-class FlowMatchingModel(nn.Module):
+class FlowMatchingModel_old(nn.Module):
     def __init__(
         self, velocity_field: nn.Module, prob_path: nn.Module,
-        base_dist: nn.Module, solver: Callable, device: str="cpu"
+        base_dist: nn.Module, solver: None|Callable=None, device: str="cpu",
+        time_scale: Tuple[int|float, int|float]=(0., 1.)
     ) -> None:
         super().__init__()
 
@@ -257,6 +306,7 @@ class FlowMatchingModel(nn.Module):
         self.vf = velocity_field
         self.path = prob_path.to(self.device)
         self.solver = solver
+        self.time_scale = time_scale
     
     def forward(
         self, x1: torch.Tensor, y: torch.Tensor|None=None, **kwargs
@@ -281,11 +331,49 @@ class FlowMatchingModel(nn.Module):
             return self.vf(x, t, y=y, **kwargs)
 
         x_path, ts = solver(
-            vf_ode, [0., 1.], x_init, n_steps, device=self.device)
+            vf_ode, [self.time_scale[0],self.time_scale[1]], x_init, n_steps,
+            device=self.device
+        )
         if not show_path:
             return x_path[-1]
         else:
             return x_path, ts
+
+class FlowMatchingModel(nn.Module):
+    def __init__(
+        self, velocity_field: nn.Module, prob_path: nn.Module,
+        base_dist: nn.Module, sampler: nn.Module, device: str="cpu",
+        time_scale: Tuple[int|float, int|float]=(0., 1.)
+    ) -> None:
+        super().__init__()
+
+        self.device = device
+        self.base = base_dist.to(self.device)
+        self.vf = velocity_field
+        self.path = prob_path.to(self.device)
+        self.sampler = sampler
+        self.time_scale = time_scale
+    
+    def forward(
+        self, x1: torch.Tensor, y: torch.Tensor|None=None, **kwargs
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        t = torch.rand((x1.shape[0], 1), device=self.device)
+
+        cond_path_sample, cond_velocity_sample = self.path(t, x1, self.base())
+        velocity_prediction = self.vf(
+            cond_path_sample.to(self.device), t, y=y, **kwargs)
+
+        return velocity_prediction, cond_velocity_sample
+
+    @torch.inference_mode()
+    def sample(
+        self, sample_shape=(1,), n_steps: int=100, y: torch.Tensor|None=None,
+        show_path: bool=False, **kwargs
+    ) -> torch.Tensor:
+        return self.sampler(
+            self.vf, sample_shape, y=y, n_steps=n_steps,
+            show_path=show_path, **kwargs
+        )
 
 class CatFlow(nn.Module):
     def __init__(
@@ -302,7 +390,7 @@ class CatFlow(nn.Module):
         self.node_tokens = node_tokens
         self.edge_tolens = edge_tokens
         self.max_n_nodes = max_n_nodes
-    
+
     def forward(
         self, batch: Data, edge_loss_weight: float=1.0,
         edge_weights: torch.Tensor=torch.ones(4)
