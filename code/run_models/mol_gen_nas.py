@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 from pathlib import Path
 import sys
-from typing import List
 
 PROJECT_DIR = Path(__file__).resolve().parents[2]
 CODE_DIR = PROJECT_DIR / "code"
@@ -20,10 +19,8 @@ if __name__ == "__main__":
 
     from data_proc.mol_preproc import TU_MUTAG_CONFIG, create_processor_list
     from gnn_.datasets_ import ProcessedInMemoryDataset
-    from hpo.basic_nn import UNET_BOUNDS, OPTIM_BOUNDS
     from hpo.gen_model import (
-        DIFFUSION_BOUNDS, VDM_DIFFUSION_BOUNDS, DEFOG_BOUNDS,
-        DDPMUNetMNISTSearchProblem, VDMUNetMNISTSearchProblem,
+        DEFOG_BOUNDS,
         DeFoGMolSearchProblem
     )
 
