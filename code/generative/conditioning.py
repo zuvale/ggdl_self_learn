@@ -28,8 +28,10 @@ class FiLMedNetwork(nn.Module):
             self.act_fun = None
     
     def forward(
-        self, x: torch.Tensor, *conditions: torch.Tensor) -> torch.Tensor:
-        c = self._get_embedding(*conditions)
+        self, x: torch.Tensor, *arg_conditions: torch.Tensor,
+        **kwarg_conditions: torch.Tensor
+    ) -> torch.Tensor:
+        c = self._get_embedding(*arg_conditions, **kwarg_conditions)
 
         # 2 * (1/batch_size, hidden_channels)
         gamma, beta = torch.chunk(self.film(c), 2, dim=-1)
@@ -153,7 +155,7 @@ class FILMedCNN(nn.Module):
         # 2 * (batch_size, hidden_channels, height, width)
         return torch.chunk(x, 2, dim=1)
 
-class FiLMHybrid(FiLMedNetwork):
+class FiLMHybrid_old(FiLMedNetwork):
     """
     Rework class a bit regarding embedding dim's and so on.
     """
@@ -182,7 +184,7 @@ class FiLMHybrid(FiLMedNetwork):
         c = torch.cat([cont_emb, class_emb], dim=cat_dim)
         return self.mod_map(c)
 
-class FiLMHybrid2(FiLMedNetwork):
+class FiLMHybrid(FiLMedNetwork):
     """
     Rework class a bit regarding embedding dim's and so on.
     """
@@ -191,7 +193,7 @@ class FiLMHybrid2(FiLMedNetwork):
         class_emb_dim: int, cont_emb_dim: int,
         class_embedding: nn.Module|nn.Sequential,
         *continuous_embeddings: nn.Module|nn.Sequential,
-         act_fun: nn.Module|None=nn.ReLU
+        act_fun: nn.Module|None=nn.ReLU
     ) -> None:
         super().__init__(
             network, class_embedding, class_emb_dim, feature_dim,
@@ -215,7 +217,7 @@ class FiLMHybrid2(FiLMedNetwork):
         if class_emb.size(0) != cont_embs[0].size(0):
             class_emb = class_emb.expand(
                 (cont_embs[0].size(0), class_emb.size(1)))
-        c = torch.cat(*cont_embs + [class_emb], dim=cat_dim)
+        c = torch.cat(cont_embs + [class_emb], dim=cat_dim)
         return self.mod_map(c)
 
 class MLPTimeDependent(MLP):
@@ -258,8 +260,8 @@ class MLPTimeDependent(MLP):
         return x
     
     def _film_network(
-        self, s_params, c_flag, feat_dim, emb_dim, n_t, t_scale, act_fun,
-        n_vars
+        self, s_params, c_flag: bool, feat_dim: int, emb_dim: int, n_t: int,
+        t_scale: float, act_fun: nn.Module, n_vars: int
     ) -> nn.Module:
         if n_vars == 1:
             return FiLMedNetwork(
@@ -425,7 +427,7 @@ class UNetTimeClassDependent(UNet):
     def __init__(
         self, n_timesteps: int, time_emb_dim: int, class_emb_dim,
         n_classes: int, *args, continuous: bool=False, time_scale: float=1.0,
-        unet_act_fun: nn.Module|None=nn.ReLU,
+        n_vars: int=1, unet_act_fun: nn.Module|None=nn.ReLU,
         film_act_fun: nn.Module|None=nn.ReLU,
         **kwargs
     ) -> None:
@@ -436,14 +438,13 @@ class UNetTimeClassDependent(UNet):
             for _, l_params in conv.named_children():
                 for _, s_params in l_params.named_children():
                     if "conv" in str(type(s_params)):
-                        new_convs.append(FiLMHybrid(
-                            deepcopy(conv), _make_time_embedding(
-                                continuous, time_emb_dim, n_timesteps,
-                                time_scale
-                            ), ClassEmbedding(class_emb_dim, n_classes),
-                            time_emb_dim, class_emb_dim, s_params.out_channels,
-                            act_fun=film_act_fun
+                        new_convs.append(self._film_network(
+                            deepcopy(conv), s_params.out_channels,
+                            class_emb_dim, time_emb_dim, n_timesteps,
+                            continuous, time_scale, n_classes, film_act_fun,
+                            n_vars
                         ))
+
         self.convs = nn.ModuleList(new_convs)
 
         new_tconvs = []
@@ -454,13 +455,11 @@ class UNetTimeClassDependent(UNet):
             for _, l_params in tconv.named_children():
                 for _, s_params in l_params.named_children():
                     if "Transpose" in str(type(s_params)):
-                        new_tconvs.append(FiLMHybrid(
-                            deepcopy(tconv), _make_time_embedding(
-                                continuous, time_emb_dim, n_timesteps,
-                                time_scale
-                            ), ClassEmbedding(class_emb_dim, n_classes),
-                            time_emb_dim, class_emb_dim, s_params.out_channels,
-                            act_fun=f_act_fun
+                        new_tconvs.append(self._film_network(
+                            deepcopy(tconv), s_params.out_channels,
+                            class_emb_dim, time_emb_dim, n_timesteps,
+                            continuous, time_scale, n_classes, f_act_fun,
+                            n_vars
                         ))
         self.tconvs = nn.ModuleList(new_tconvs)
 
@@ -470,20 +469,35 @@ class UNetTimeClassDependent(UNet):
     ) -> torch.Tensor:
         c_xs = []
         for i, (conv, pool) in enumerate(zip(self.convs, self.pools)):
-            x = conv(x, t, y, **args)
+            x = conv(x, t, *args, y=y)
             if i < self.n_layers - 1:
                 # (B, C_in, H_in, W_in) -> (B, C_out, H_out, W_out)
                 c_xs.append(x)
                 x = pool(x)
-        
+
         for j, tconv in enumerate(self.tconvs):
             if j > 0:
                 # (B, 2*C_out, H_out, W_out) -> (B, C_in, H_in, W_in)
                 x = torch.cat((x, c_xs[-j]), dim=cat_dim)
-            x = tconv(x, t, y, **args)
-        
+            x = tconv(x, t, *args, y=y)
+
         return x
 
+    def _film_network(
+        self, conv: nn.Module, feat_dim: int, c_emb_dim: int, t_emb_dim: int,
+        n_t: int, c_flag: bool, t_scale: float, n_classes: int,
+        act_fun: nn.Module, n_vars: int
+    ) -> nn.Module:
+        time_embs = [_make_time_embedding(c_flag, t_emb_dim, n_t, t_scale)]
+        if n_vars > 1:
+            time_embs.append(
+                _make_time_embedding(c_flag, t_emb_dim, n_t, t_scale))
+        
+        return FiLMHybrid(
+            deepcopy(conv), feat_dim, c_emb_dim, t_emb_dim,
+            ClassEmbedding(c_emb_dim, n_classes), *time_embs, act_fun=act_fun
+        )
+        
 def _make_time_embedding(
     cont_flag: bool, emb_dim: int, tsteps: int, tscale: float) -> nn.Module:
     if cont_flag:
