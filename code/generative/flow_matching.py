@@ -376,7 +376,8 @@ class ShortCutFM(FlowMatchingModel):
             consist_path.to(self.device), t_consist, h_consist, y=y_consist,
             **kwargs
         )
-        bootstrap_step = consist_path + h_consist[:, None] * bootstrap_1
+        bootstrap_step = (
+            consist_path + broadcast_(h_consist, bootstrap_1) * bootstrap_1)
         bootstrap_2 = self.vf(
             bootstrap_step, t_consist + h_consist, h_consist, y=y_consist,
             **kwargs
