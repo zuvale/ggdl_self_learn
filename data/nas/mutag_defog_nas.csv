@@ -1,0 +1,2 @@
+node_hidden,edge_hidden,time_emb_size,class_emb_size,n_layers,lambda_eloss,dbl_weight,tpl_weight,ne_weight,dbl_bias,tpl_bias,ne_bias,rate_exit_cap,node_scale,edge_scale
+96,32,32,32,4,4.0,0.9851901840128114,0.46925731046485303,0.8088922529640963,-0.8029548188330433,-1.0,0.0,0.8,0.7276006395095583,0.9035087709916008
