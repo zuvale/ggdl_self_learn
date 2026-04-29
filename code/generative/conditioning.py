@@ -155,35 +155,6 @@ class FILMedCNN(nn.Module):
         # 2 * (batch_size, hidden_channels, height, width)
         return torch.chunk(x, 2, dim=1)
 
-class FiLMHybrid_old(FiLMedNetwork):
-    """
-    Rework class a bit regarding embedding dim's and so on.
-    """
-    def __init__(
-        self, network: nn.Module|nn.Sequential,
-        continuous_embedding: nn.Module|nn.Sequential,
-        class_embedding: nn.Module|nn.Sequential, embedding_dim_1: int,
-        embedding_dim_2: int, feature_dim: int, act_fun: nn.Module|None=nn.ReLU
-    ) -> None:
-        super().__init__(
-            network, continuous_embedding, embedding_dim_1, feature_dim,
-            act_fun=act_fun
-        )
-
-        self.cont_emb = continuous_embedding
-        self.class_emb = class_embedding
-        self.mod_map = nn.Linear(
-            embedding_dim_1 + embedding_dim_2, embedding_dim_1)
-    
-    def _get_embedding(
-        self, t: torch.Tensor, y: torch.Tensor|None=None, cat_dim: int=1
-    ) -> torch.Tensor:
-        cont_emb, class_emb = self.cont_emb(t), self.class_emb(y)
-        if class_emb.size(0) != cont_emb.size(0):
-            class_emb = class_emb.expand((cont_emb.size(0), class_emb.size(1)))
-        c = torch.cat([cont_emb, class_emb], dim=cat_dim)
-        return self.mod_map(c)
-
 class FiLMHybrid(FiLMedNetwork):
     """
     Rework class a bit regarding embedding dim's and so on.
