@@ -20,8 +20,8 @@ if __name__ == "__main__":
     from data_proc.mol_preproc import TU_MUTAG_CONFIG, create_processor_list
     from gnn_.datasets_ import ProcessedInMemoryDataset
     from hpo.gen_model import (
-        DEFOG_BOUNDS,
-        DeFoGMolSearchProblem
+        DEFOG_BOUNDS, CATFLOW_BOUNDS,
+        DeFoGMolSearchProblem, ShortcutCatFlowMolSearchProblem
     )
 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -67,7 +67,15 @@ if __name__ == "__main__":
     defog_parser = subparsers.add_parser(
         name="defog",
         prog="mol_gen_nas.py defog",
-        description="Use the DeFoG architecture (discrete flow matching over ndde/edge tokens)",
+        description="Use the DeFoG architecture (discrete flow matching over node/edge tokens)",
+        parents=[common_parser, defog_parent]
+    )
+
+    defog_parent = argparse.ArgumentParser(add_help=False)
+    defog_parser = subparsers.add_parser(
+        name="catflow",
+        prog="mol_gen_nas.py catflow",
+        description="Use the CatFlow architecture (variational flow matching with categorical distributions)",
         parents=[common_parser, defog_parent]
     )
 
@@ -106,9 +114,16 @@ if __name__ == "__main__":
 
     if cli_args.model_type == "defog":
         problem = DeFoGMolSearchProblem(
-        DEFOG_BOUNDS, data_set=proc_dataset, data_loader=data_loader,
-        n_epochs=EPOCHS, n_solv_steps=SOLV_STEPS, n_samples=100, device=DEVICE
-    )
+            DEFOG_BOUNDS, data_set=proc_dataset, data_loader=data_loader,
+            n_epochs=EPOCHS, n_solv_steps=SOLV_STEPS, n_samples=100,
+            device=DEVICE
+        )
+    if cli_args.model_type == "catflow":
+        problem = ShortcutCatFlowMolSearchProblem(
+            CATFLOW_BOUNDS, data_set=proc_dataset, data_loader=data_loader,
+            n_epochs=EPOCHS, n_solv_steps=SOLV_STEPS, n_samples=100,
+            device=DEVICE
+        )
     
     optimizer_hpo = L_SHADE(epoch=GENERATIONS, pop_size=POP_SIZE)
     optimizer_hpo.solve(problem, seed=SEED)
