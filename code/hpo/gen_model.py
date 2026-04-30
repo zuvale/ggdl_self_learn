@@ -5,6 +5,7 @@ import rdkit.Chem as Chem
 from rdkit import rdBase
 import torch
 import torch.nn as nn
+from torch_geometric.data import Data
 from typing import Dict, Iterable, Tuple
 
 from data_proc.mol_preproc import (
@@ -15,6 +16,8 @@ from generative.diffusion import (
     ConstantLinearSchedule, LearnableLinearSchedule,
     DDPMReverseProcess, VDMReverseProcess
 )
+from generative.flow_matching import (
+    CatFlowInterpolant, ShortcutCatFlowODESampler, ShortcutCatFlow)
 from generative.discrete_flow_matching import (
     LinearDiscreteNoiser, LinearDiscreteRateMatrix, CTMCSampler, DeFoG
 )
@@ -33,14 +36,13 @@ DIFFUSION_BOUNDS = [
         name="f_act_fun"
     )
 ]
-
 VDM_DIFFUSION_BOUNDS = DIFFUSION_BOUNDS + [
     FloatVar(lb=-30, ub=-0.1, name="gamma_min"),
     FloatVar(lb=0.1, ub=30, name="gamma_max"),
     MixedSetVar(valid_sets=POWERS_OF_2, name="gamma_hid_size")
 ]
 
-DEFOG_BOUNDS = [
+MOLFM_BOUNDS = [
     MixedSetVar(valid_sets=[32, 48, 64, 96], name="node_hidden"),
     MixedSetVar(valid_sets=[32, 48, 64, 96], name="edge_hidden"),
     MixedSetVar(valid_sets=[32, 48, 64, 96], name="time_emb_size"),
@@ -52,7 +54,13 @@ DEFOG_BOUNDS = [
     FloatVar(lb=0.8, ub=2.0, name="ne_weight"),
     FloatVar(lb=-1.5, ub=-0.5, name="dbl_bias"),
     FloatVar(lb=-4.0, ub=-1.0, name="tpl_bias"),
-    FloatVar(lb=0.0, ub=1.0, name="ne_bias"),
+    FloatVar(lb=0.0, ub=1.0, name="ne_bias")
+]
+CATFLOW_BOUNDS = MOLFM_BOUNDS + [
+    FloatVar(lb=0.0001, ub=0.01, name="learning_rate"),
+    FloatVar(lb=0.001, ub=0.01, name="weight_decay"),
+]
+DEFOG_BOUNDS = MOLFM_BOUNDS + [
     FloatVar(lb=0.2, ub=0.8, name="rate_exit_cap"),
     FloatVar(lb=0.5, ub=1.0, name="node_scale"),
     FloatVar(lb=0.3, ub=1.0, name="edge_scale"),
@@ -195,7 +203,231 @@ class VDMUNetMNISTSearchProblem(DDPMUNetMNISTSearchProblem):
             self.n_timesteps
         )
 
-class DeFoGMolSearchProblem(Problem):
+class FMMolSearchProblem(Problem):
+    def __init__(
+        self, bounds: Iterable[BaseVar]|None=None, minmax: str="min",
+        data_set=None, data_loader=None, n_epochs: int=100,
+        n_solv_steps: int=100, n_samples: int=100, n_replicates: int=3,
+        device: str="cpu",
+        **kwargs
+    ) -> None:
+        self.data_set = data_set
+        self.data_loader = data_loader
+        self.n_epochs = n_epochs
+        self.n_solv_steps = n_solv_steps
+        self.n_samples = n_samples
+        self.device = device
+        self.n_replicates = n_replicates
+        super().__init__(bounds, minmax, **kwargs)
+    
+    def obj_func(
+        self, x: ndarray,
+        score_weights: Tuple[float, float, float]=(0.55, 0.25, 0.20)
+    ) -> float:
+        x_decoded = self.decode_solution(x)
+
+        valid_connected = 0
+        mean_size = 0
+        target_size = 15
+        ring_ratio = 0
+        for _ in range(self.n_replicates):
+            model = self.define_model(x_decoded)
+            optimizer = self.define_optimizer(model, x_decoded)
+            self.training_loop(model, optimizer, x_decoded)
+            sampled_graphs = self.sample_graphs(
+                model, self.n_samples, self.n_solv_steps, x_decoded)
+
+            KEK_EDGE_DICT = {
+                n: b
+                for n, b in TU_MUTAG_CONFIG["edge_dict"].items()
+                if n != "aromatic"
+            }
+            KEK_EDGE_LIST_RDK = list(KEK_EDGE_DICT.values())
+            sampled_mols = batch_to_mols(
+                sampled_graphs, TU_MUTAG_CONFIG["node_list"],
+                KEK_EDGE_LIST_RDK, TU_MUTAG_CONFIG["max_n_atoms"]
+            )
+
+            del model
+            import gc
+            gc.collect()
+            torch.cuda.empty_cache() 
+
+            fcv = 0
+            fcv_size = 0
+            rc = 0
+            with rdBase.BlockLogs():
+                for mol in sampled_mols:
+                    try:
+                        mol_val = fix_nitro_charges(mol)
+                        if "." not in Chem.MolToSmiles(mol_val):
+                            fcv += mol_val.GetNumAtoms(onlyExplicit=True)
+                            fcv += 1
+
+                            if mol_val.GetRingInfo().NumRings() > 0:
+                                rc += 1
+                    except:
+                        pass
+            valid_connected += fcv / self.n_samples
+            mean_size += fcv_size / max(fcv, 1)
+            ring_ratio += rc / max(fcv, 1)
+
+            size_score = min(mean_size / target_size, 1.0)
+            score = (
+                score_weights[0] * valid_connected
+                    + score_weights[1] * size_score
+                    + score_weights[2] * ring_ratio
+            )
+
+        obj_val = 1.0 - (score / self.n_replicates)
+        return obj_val
+    
+    def define_model(self, hyperpars: Dict) -> nn.Module:
+        raise NotImplementedError
+    
+    def define_optimizer(self, model: nn.Module, hyperpars: Dict):
+        raise NotImplementedError
+    
+    def training_loop(
+        self, model: nn.Module, optimizer, hyperpars: Dict) -> None:
+        lambda_ = hyperpars["lambda_eloss"]
+        model.train()
+        epochs = self.n_epochs
+
+        for epoch in range(epochs):
+            for batch in self.data_loader:
+                optimizer.zero_grad()
+
+                loss = model(
+                    batch, edge_loss_weight=lambda_,
+                    edge_weights=torch.tensor([
+                        1.0, hyperpars["dbl_weight"],
+                        hyperpars["tpl_weight"], hyperpars["ne_weight"]
+                    ])
+                )
+
+                loss.backward()
+                optimizer.step()
+    
+    def sample_graphs(
+        self, model: nn.Module, n_samples: int, n_ode_steps: int,
+        hyperpars: Dict
+    ) -> Data:
+        return NotImplementedError
+
+class DeFoGMolSearchProblem(FMMolSearchProblem):
+    def define_model(self, hyperpars: Dict) -> nn.Module:
+        base_dist = MarginalGraphBase(self.data_set, device=self.device)
+        noiser = LinearDiscreteNoiser(base_dist)
+        n_atom_tokens, n_bond_tokens = 8, 4
+        node_hidden_size = hyperpars["node_hidden"]
+        edge_hidden_size = hyperpars["edge_hidden"]
+        time_emb_size = hyperpars["time_emb_size"]
+        class_emb_size = hyperpars["class_emb_size"]
+        n_classes = 2
+        n_update = hyperpars["n_layers"]
+        denoiser = GNNDenoiser(
+            n_atom_tokens, n_bond_tokens, node_hidden_size, edge_hidden_size,
+            time_emb_size, class_emb_size, n_classes, n_update,
+            message_passing="pna_conv", loader=self.data_loader
+        ).to(self.device)
+        sampler = CTMCSampler(
+            base_dist, LinearDiscreteRateMatrix(
+                base_dist, n_atom_tokens, n_bond_tokens).to(self.device),
+            n_atom_tokens, n_bond_tokens, TU_MUTAG_CONFIG["max_n_atoms"],
+            device=self.device
+        )
+        model = DeFoG(
+            base_dist, noiser, denoiser, sampler, n_atom_tokens, n_bond_tokens,
+            TU_MUTAG_CONFIG["max_n_atoms"]
+        ).to(self.device)
+
+        return model
+
+    def define_optimizer(self, model: nn.Module, hyperpars: Dict):
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+        return optimizer
+
+    def sample_graphs(
+        self, model: nn.Module, n_samples: int, n_ode_steps: int,
+        hyperpars: Dict
+    ) -> Data:
+        with torch.inference_mode():
+                model.eval()
+                y = torch.cat((
+                    torch.ones((n_samples//2,), dtype=torch.long),
+                    torch.zeros((n_samples//2,), dtype=torch.long),
+                ))
+
+                batch = model.sample(
+                    (n_samples,), y=y, n_steps=n_ode_steps,
+                    bond_order_bias=(
+                        hyperpars["dbl_bias"], hyperpars["tpl_bias"],
+                        hyperpars["ne_bias"]
+                    ),
+                    exit_cap=hyperpars["rate_exit_cap"],
+                    temp_scales=(
+                        hyperpars["node_scale"], hyperpars["edge_scale"])
+                )
+
+        return batch
+
+class ShortcutCatFlowMolSearchProblem(FMMolSearchProblem):
+    def define_model(self, hyperpars: Dict) -> nn.Module:
+        base_dist = MarginalGraphBase(self.data_set, device=self.device)
+        interpolator = CatFlowInterpolant(
+            base_dist, TU_MUTAG_CONFIG["max_n_atoms"])
+        n_atom_tokens, n_bond_tokens = 8, 4
+        node_hidden_size = hyperpars["node_hidden"]
+        edge_hidden_size = hyperpars["edge_hidden"]
+        time_emb_size = hyperpars["time_emb_size"]
+        class_emb_size = hyperpars["class_emb_size"]
+        n_classes = 2
+        n_update = hyperpars["n_layers"]
+        denoiser = GNNDenoiser(
+            n_atom_tokens, n_bond_tokens, node_hidden_size, edge_hidden_size,
+            time_emb_size, class_emb_size, n_classes, n_update,
+            message_passing="pna_conv", loader=self.data_loader
+        ).to(self.device)
+        sampler = ShortcutCatFlowODESampler(
+            base_dist, n_atom_tokens, n_bond_tokens, TU_MUTAG_CONFIG["max_n_atoms"],
+            device=self.device
+        )
+        model = ShortcutCatFlow(
+            base_dist, interpolator, denoiser, sampler, n_atom_tokens, n_bond_tokens,
+            TU_MUTAG_CONFIG["max_n_atoms"], device=self.device
+        ).to(self.device)
+        return model
+
+    def define_optimizer(self, model: nn.Module, hyperpars: Dict):
+        optimizer = torch.optim.AdamW(
+            model.parameters(), lr=hyperpars["learning_rate"],
+            weight_decay=hyperpars["weight_decay"]
+        )
+        return optimizer
+
+    def sample_graphs(
+        self, model: nn.Module, n_samples: int, n_ode_steps: int,
+        hyperpars: Dict
+    ) -> Data:
+        with torch.inference_mode():
+                model.eval()
+                y = torch.cat((
+                    torch.ones((n_samples//2,), dtype=torch.long),
+                    torch.zeros((n_samples//2,), dtype=torch.long),
+                ))
+
+                batch = model.sample(
+                    (n_samples,), y=y, n_steps=n_ode_steps,
+                    bond_order_bias=(
+                        hyperpars["dbl_bias"], hyperpars["tpl_bias"],
+                        hyperpars["ne_bias"]
+                    )
+                )
+
+        return batch
+
+class DeFoGMolSearchProblem_old(Problem):
     def __init__(
         self, bounds: Iterable[BaseVar]|None=None, minmax: str="min",
         data_set=None, data_loader=None, n_epochs: int=100,
