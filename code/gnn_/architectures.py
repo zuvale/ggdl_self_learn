@@ -6,7 +6,7 @@ from typing import Tuple
 
 from nn_.mlp import MLP
 from nn_.embedding import ClassEmbedding, ContinuousSinusoidalPE
-from generative.conditioning import FiLMHybrid
+from generative.conditioning import _make_time_embedding, FiLMHybrid
 from gnn_.utils import (
     extract_triu_node_data, extract_triu_edge_data, mirror_triu_to_tril_again)
 
@@ -17,8 +17,8 @@ class GNNDenoiser(nn.Module):
         edge_hidden: int, time_emb_dim: int,
         class_emb_dim: int, n_classes: int, n_layers: int=1,
         updater_layers: int=2, updater_size: int=4, input_type: str="tokens",
-        message_passing: str="gineconv", act_fun: nn.Module=nn.GELU,
-        loader=None
+        message_passing: str="gineconv", n_vars: int=1,
+        act_fun: nn.Module=nn.GELU, loader=None
     ) -> None:
         super().__init__()
 
@@ -59,27 +59,23 @@ class GNNDenoiser(nn.Module):
             )
 
             self.node_filmers.append(
-                FiLMHybrid(
+                self._film_network(
                     MLP(
                         node_hidden, node_hidden,
                         [node_hidden*updater_size]*updater_layers,
                         act_funs=[act_fun]*(updater_layers + 1)
-                    ),
-                    ContinuousSinusoidalPE(time_emb_dim),
-                    ClassEmbedding(class_emb_dim, n_classes), time_emb_dim,
-                    class_emb_dim, node_hidden, act_fun=act_fun
+                    ), node_hidden, class_emb_dim, time_emb_dim, n_classes,
+                    act_fun, n_vars
                 )
             )
             self.edge_filmers.append(
-                FiLMHybrid(
+                self._film_network(
                     MLP(
                         edge_hidden, edge_hidden,
                         [edge_hidden*updater_size]*updater_layers,
                         act_funs=[act_fun]*(updater_layers + 1)
-                    ),
-                    ContinuousSinusoidalPE(time_emb_dim),
-                    ClassEmbedding(class_emb_dim, n_classes), time_emb_dim,
-                    class_emb_dim, edge_hidden, act_fun=act_fun
+                    ), edge_hidden, class_emb_dim, time_emb_dim, n_classes,
+                    act_fun, n_vars
                 )
             )
 
@@ -87,11 +83,16 @@ class GNNDenoiser(nn.Module):
             self.edge_norms.append(nn.LayerNorm(edge_hidden))
     
     def forward(
-        self, batch: Data, t: torch.Tensor
+        self, batch: Data, t: torch.Tensor, *args
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         e_idx, y = batch.edge_index, batch.y
         row, col = e_idx
         upper_graph = batch.batch[row[row < col]]
+
+        node_args, edge_args = [], []
+        for a in args:
+            node_args.append(a[batch.batch])
+            edge_args.append(a[upper_graph])
 
         # 1. Project Data
         if self.input_type == "tokens":
@@ -111,7 +112,8 @@ class GNNDenoiser(nn.Module):
                 hid_node, e_idx, edge_attr=hid_edge)
             # 2.1.2 Cast Time and Class to Node Level and Modulate
             t_node, y_node = t[batch.batch], y[batch.batch]
-            node_update = self.node_filmers[k](node_update, t_node, y_node)
+            node_update = self.node_filmers[k](
+                node_update, t_node, *node_args, y=y_node)
             # 2.1.3 Residual Connection & Layer Normalization
             hid_node = self.node_norms[k](hid_node + node_update)
 
@@ -125,7 +127,8 @@ class GNNDenoiser(nn.Module):
             ], dim=-1))
             # 2.2.3 Cast Time and Class to Edge Level and Modulate
             t_u_e, y_u_e = t[upper_graph], y[upper_graph]
-            triu_e_update = self.edge_filmers[k](triu_e_update, t_u_e, y_u_e)
+            triu_e_update = self.edge_filmers[k](
+                triu_e_update, t_u_e, *edge_args, y=y_u_e)
             # 2.2.4 Residual Connection & Layer Normalization
             h_triu_e = self.edge_norms[k](h_triu_e + triu_e_update)
             # 2.2.5 Mirror Final Features Back to "Full Adjacency"
@@ -166,3 +169,16 @@ class GNNDenoiser(nn.Module):
                 ["identity", "amplification", "attenuation"], deg,
                 edge_dim=edge_hidden, act="gelu"
             )
+    
+    def _film_network(
+        self, net: nn.Module, feat_dim: int, c_emb_dim: int, t_emb_dim: int,
+        n_classes: int, act_fun: nn.Module, n_vars: int
+    ) -> nn.Module:
+        time_embs = [ContinuousSinusoidalPE(t_emb_dim)]
+        if n_vars > 1:
+            time_embs.append(ContinuousSinusoidalPE(t_emb_dim))
+        
+        return FiLMHybrid(
+            net, feat_dim, c_emb_dim, t_emb_dim,
+            ClassEmbedding(c_emb_dim, n_classes), *time_embs, act_fun=act_fun
+        )
