@@ -261,7 +261,7 @@ class FMMolSearchProblem(Problem):
                     try:
                         mol_val = fix_nitro_charges(mol)
                         if "." not in Chem.MolToSmiles(mol_val):
-                            fcv += mol_val.GetNumAtoms(onlyExplicit=True)
+                            fcv_size += mol_val.GetNumAtoms(onlyExplicit=True)
                             fcv += 1
 
                             if mol_val.GetRingInfo().NumRings() > 0:
@@ -386,8 +386,9 @@ class ShortcutCatFlowMolSearchProblem(FMMolSearchProblem):
         n_update = hyperpars["n_layers"]
         denoiser = GNNDenoiser(
             n_atom_tokens, n_bond_tokens, node_hidden_size, edge_hidden_size,
-            time_emb_size, class_emb_size, n_classes, n_update,
-            message_passing="pna_conv", loader=self.data_loader
+            time_emb_size, class_emb_size, n_classes, n_update, n_vars=2,
+            message_passing="pna_conv", loader=self.data_loader,
+            input_type="probs"
         ).to(self.device)
         sampler = ShortcutCatFlowODESampler(
             base_dist, n_atom_tokens, n_bond_tokens, TU_MUTAG_CONFIG["max_n_atoms"],
