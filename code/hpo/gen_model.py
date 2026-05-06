@@ -58,7 +58,7 @@ MOLFM_BOUNDS = [
 ]
 CATFLOW_BOUNDS = MOLFM_BOUNDS + [
     FloatVar(lb=0.0001, ub=0.01, name="learning_rate"),
-    FloatVar(lb=0.001, ub=0.01, name="weight_decay"),
+    FloatVar(lb=0.0, ub=0.01, name="weight_decay"),
 ]
 DEFOG_BOUNDS = MOLFM_BOUNDS + [
     FloatVar(lb=0.2, ub=0.8, name="rate_exit_cap"),
@@ -237,6 +237,21 @@ class FMMolSearchProblem(Problem):
             sampled_graphs = self.sample_graphs(
                 model, self.n_samples, self.n_solv_steps, x_decoded)
 
+            node_tokens = sampled_graphs.x.argmax(dim=-1)
+            edge_tokens = sampled_graphs.edge_attr.argmax(dim=-1)
+            only_no_nodes = (
+                node_tokens != sampled_graphs.x.size(-1) - 1
+            ).sum().item() == 0
+            only_no_edges = (
+                edge_tokens != sampled_graphs.edge_attr.size(-1) - 1
+            ).sum().item() == 0
+            if only_no_nodes or only_no_edges:
+                del model
+                import gc
+                gc.collect()
+                torch.cuda.empty_cache()
+                return 1.0
+
             KEK_EDGE_DICT = {
                 n: b
                 for n, b in TU_MUTAG_CONFIG["edge_dict"].items()
@@ -260,8 +275,10 @@ class FMMolSearchProblem(Problem):
                 for mol in sampled_mols:
                     try:
                         mol_val = fix_nitro_charges(mol)
-                        if "." not in Chem.MolToSmiles(mol_val):
-                            fcv_size += mol_val.GetNumAtoms(onlyExplicit=True)
+                        n_atoms = mol_val.GetNumAtoms(onlyExplicit=True)
+                        smiles = Chem.MolToSmiles(mol_val)
+                        if n_atoms > 0 and "." not in smiles:
+                            fcv_size += n_atoms
                             fcv += 1
 
                             if mol_val.GetRingInfo().NumRings() > 0:
@@ -272,14 +289,17 @@ class FMMolSearchProblem(Problem):
             mean_size += fcv_size / max(fcv, 1)
             ring_ratio += rc / max(fcv, 1)
 
-            size_score = min(mean_size / target_size, 1.0)
-            score = (
-                score_weights[0] * valid_connected
-                    + score_weights[1] * size_score
-                    + score_weights[2] * ring_ratio
-            )
+        valid_connected /= self.n_replicates
+        mean_size /= self.n_replicates
+        ring_ratio /= self.n_replicates
+        size_score = min(mean_size / target_size, 1.0)
+        score = (
+            score_weights[0] * valid_connected
+                + score_weights[1] * size_score
+                + score_weights[2] * ring_ratio
+        )
 
-        obj_val = 1.0 - (score / self.n_replicates)
+        obj_val = 1.0 - score
         return obj_val
     
     def define_model(self, hyperpars: Dict) -> nn.Module:
