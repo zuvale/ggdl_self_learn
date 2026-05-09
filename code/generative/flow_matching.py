@@ -233,10 +233,12 @@ class CatFlowODESampler(nn.Module):
     
     def compute_step_probs(
         self, denoiser: nn.Module, batch: Data, t: torch.Tensor,
-        *args: torch.Tensor,
+        *args: torch.Tensor, no_atom_bias: float|None=None,
         bond_order_bias: Tuple[float, float, float]|None=None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         node_logits, edge_logits = denoiser(batch, t, *args)
+        if no_atom_bias:
+            node_logits[:, -1] += no_atom_bias
         if bond_order_bias:
             dbl_b, tpl_b, ne_b = bond_order_bias
             edge_logits[:, self.bond_types.index("double")] += dbl_b
@@ -247,11 +249,18 @@ class CatFlowODESampler(nn.Module):
     
     @staticmethod
     def discretize_graph_probs(
-        batch: Data, nc_node: int, nc_edge: int) -> Data:
+        batch: Data, nc_node: int, nc_edge: int, sample_cat: bool=True
+    ) -> Data:
         batch = batch.clone()
 
-        batch.x = batch.x.argmax(dim=1)
-        batch.edge_attr = batch.edge_attr.argmax(dim=1)
+        if sample_cat:
+            batch.x = torch.distributions.Categorical(probs=batch.x).sample()
+            batch.edge_attr = torch.distributions.Categorical(
+                probs=batch.edge_attr).sample()
+        else:
+            batch.x = batch.x.argmax(dim=1)
+            batch.edge_attr = batch.edge_attr.argmax(dim=1)
+
         batch.x = F.one_hot(batch.x, num_classes=nc_node)
         batch.edge_attr = F.one_hot(batch.edge_attr, num_classes=nc_edge)
 
@@ -529,6 +538,7 @@ class CatFlow(FlowMatchingModel):
 
     def forward(
         self, batch: Data, edge_loss_weight: float=1.0,
+        node_weights: torch.Tensor=torch.ones(8),
         edge_weights: torch.Tensor=torch.ones(4)
     ) -> torch.Tensor:
         t = torch.rand(len(batch), device=batch.x.device)
@@ -536,7 +546,9 @@ class CatFlow(FlowMatchingModel):
 
         node_logits, edge_logits = self.vf(intpol_batch, t)
 
-        node_loss = F.cross_entropy(node_logits, batch.x.float())
+        node_loss = F.cross_entropy(
+            node_logits, batch.x.float(), weight=node_weights)
+        node_weights = node_weights.to(batch.x.device)
         edge_weights = edge_weights.to(batch.x.device)
         triu_e_attr = extract_triu_edge_data(batch.edge_index, batch.edge_attr)
         triu_e_logits = extract_triu_edge_data(batch.edge_index, edge_logits)
@@ -549,9 +561,9 @@ class CatFlow(FlowMatchingModel):
 
 class ShortcutCatFlow(CatFlow, ShortCutFM):
     def forward(
-        self, batch: Data, consist_ratio: float=0.25,
-        edge_loss_weight: float=1.0, edge_weights: torch.Tensor=torch.ones(4),
-        **kwargs
+        self, batch: Data, consist_ratio: float=0.1,
+        edge_loss_weight: float=1.0, node_weights: torch.Tensor=torch.ones(8),
+        edge_weights: torch.Tensor=torch.ones(4), **kwargs
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # get the indices for splitting the batch
         fm_idx, consist_idx = self.split_batch_idxes(
@@ -568,6 +580,7 @@ class ShortcutCatFlow(CatFlow, ShortCutFM):
             consist_batch.batch[row_consist[row_consist < col_consist]])
 
         # sample time and step-size separetely for FM and consistency loss
+        node_weights = node_weights.to(batch.x.device)
         edge_weights = edge_weights.to(batch.x.device)
         t_fm = torch.rand(len(fm_idx), device=self.device)
         h_fm = torch.zeros_like(t_fm)
@@ -645,7 +658,8 @@ class ShortcutCatFlow(CatFlow, ShortCutFM):
             e_idx_fm, fm_batch.edge_attr)
 
         fm_loss = (
-            F.cross_entropy(node_logits_fm, fm_batch.x.float())
+            F.cross_entropy(
+                node_logits_fm, fm_batch.x.float(), weight=node_weights)
             + edge_loss_weight * F.cross_entropy(
                 triu_e_logits_fm, triu_e_fm_tgt.float(), weight=edge_weights)
         )
