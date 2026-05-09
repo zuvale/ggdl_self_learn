@@ -49,9 +49,11 @@ MOLFM_BOUNDS = [
     MixedSetVar(valid_sets=[32, 48, 64, 96], name="class_emb_size"),
     IntegerVar(lb=1, ub=5, name="n_layers"),
     FloatVar(lb=0.5, ub=4.0, name="lambda_eloss"),
+    FloatVar(lb=0.02, ub=0.4, name="no_atom_weight"),
     FloatVar(lb=0.3, ub=1.0, name="dbl_weight"),
     FloatVar(lb=0.05, ub=0.5, name="tpl_weight"),
     FloatVar(lb=0.8, ub=2.0, name="ne_weight"),
+    FloatVar(lb=-2.5, ub=0.3, name="no_atom_bias"),
     FloatVar(lb=-1.5, ub=-0.5, name="dbl_bias"),
     FloatVar(lb=-4.0, ub=-1.0, name="tpl_bias"),
     FloatVar(lb=0.0, ub=1.0, name="ne_bias")
@@ -277,7 +279,7 @@ class FMMolSearchProblem(Problem):
                         mol_val = fix_nitro_charges(mol)
                         n_atoms = mol_val.GetNumAtoms(onlyExplicit=True)
                         smiles = Chem.MolToSmiles(mol_val)
-                        if n_atoms > 0 and "." not in smiles:
+                        if n_atoms >= 8 and "." not in smiles:
                             fcv_size += n_atoms
                             fcv += 1
 
@@ -320,6 +322,8 @@ class FMMolSearchProblem(Problem):
 
                 loss = model(
                     batch, edge_loss_weight=lambda_,
+                    node_weights=torch.Tensor([
+                        1, 1, 1, 1, 1, 1, 1, hyperpars["no_atom_weight"]]),
                     edge_weights=torch.tensor([
                         1.0, hyperpars["dbl_weight"],
                         hyperpars["tpl_weight"], hyperpars["ne_weight"]
@@ -411,12 +415,12 @@ class ShortcutCatFlowMolSearchProblem(FMMolSearchProblem):
             input_type="probs"
         ).to(self.device)
         sampler = ShortcutCatFlowODESampler(
-            base_dist, n_atom_tokens, n_bond_tokens, TU_MUTAG_CONFIG["max_n_atoms"],
-            device=self.device
+            base_dist, n_atom_tokens, n_bond_tokens,
+            TU_MUTAG_CONFIG["max_n_atoms"], device=self.device
         )
         model = ShortcutCatFlow(
-            base_dist, interpolator, denoiser, sampler, n_atom_tokens, n_bond_tokens,
-            TU_MUTAG_CONFIG["max_n_atoms"], device=self.device
+            base_dist, interpolator, denoiser, sampler, n_atom_tokens,
+            n_bond_tokens, TU_MUTAG_CONFIG["max_n_atoms"], device=self.device
         ).to(self.device)
         return model
 
@@ -440,6 +444,7 @@ class ShortcutCatFlowMolSearchProblem(FMMolSearchProblem):
 
                 batch = model.sample(
                     (n_samples,), y=y, n_steps=n_ode_steps,
+                    no_atom_bias=hyperpars["no_atom_bias"],
                     bond_order_bias=(
                         hyperpars["dbl_bias"], hyperpars["tpl_bias"],
                         hyperpars["ne_bias"]
