@@ -193,7 +193,8 @@ class CTMCSampler(nn.Module):
 
     def compute_step_probs(
         self, denoiser: nn.Module, batch: Data, t: torch.Tensor,
-        h: torch.Tensor, bond_order_bias: Tuple[float, float, float]|None=None,
+        h: torch.Tensor, no_atom_bias: float|None=None,
+        bond_order_bias: Tuple[float, float, float]|None=None,
         exit_cap: float|None=None, temp_scales: Tuple[float, float]=(1., 1.)
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         batch = batch.clone()
@@ -203,6 +204,8 @@ class CTMCSampler(nn.Module):
         h_node, h_edge = h[batch.batch][:, None], h[upper_graph][:, None]
 
         node_logits, edge_logits = denoiser(batch, t)
+        if no_atom_bias:
+            node_logits[:, -1] += no_atom_bias
         if bond_order_bias:
             dbl_b, tpl_b, ne_b = bond_order_bias
             edge_logits[:, self.bond_types.index("double")] += dbl_b
@@ -211,7 +214,7 @@ class CTMCSampler(nn.Module):
         triu_e_logits = extract_triu_edge_data(e_idx, edge_logits)
         node_final, triu_e_final = self.endpoint_sampling(
             node_logits, triu_e_logits, node_temp=temp_scales[0],
-            edge_temp=temp_scales[0]
+            edge_temp=temp_scales[1]
         )
         edge_final = mirror_triu_to_tril_again(
             e_idx, edge_logits.argmax(dim=1), triu_e_final, n_nodes)
@@ -313,6 +316,7 @@ class DeFoG(nn.Module):
     
     def forward(
         self, batch: Data, edge_loss_weight: float=1.0,
+        node_weights: torch.Tensor=torch.ones(8),
         edge_weights: torch.Tensor=torch.ones(4)
     ) -> torch.Tensor:
         t = torch.rand(len(batch), device=batch.x.device)
@@ -320,7 +324,10 @@ class DeFoG(nn.Module):
 
         node_logits, edge_logits = self.denoiser(noisy_batch, t)
 
-        node_loss = F.cross_entropy(node_logits, batch.x.float())
+        node_weights = node_weights.to(batch.x.device)
+        node_loss = F.cross_entropy(
+            node_logits, batch.x.float(), weight=node_weights)
+
         edge_weights = edge_weights.to(batch.x.device)
         triu_e_attr = extract_triu_edge_data(batch.edge_index, batch.edge_attr)
         triu_e_logits = extract_triu_edge_data(batch.edge_index, edge_logits)
@@ -334,12 +341,13 @@ class DeFoG(nn.Module):
     @torch.inference_mode()
     def sample(
         self, sample_shape=(1,), n_steps: int=100, y: torch.Tensor|None=None,
-        show_path: bool=False,
+        show_path: bool=False, no_atom_bias: float|None=None,
         bond_order_bias: Tuple[float, float, float]=(0., 0., 0.),
         exit_cap: float=0.5, temp_scales: Tuple[float, float]=(1., 1.)
     ) -> torch.Tensor|Tuple[torch.Tensor, torch.Tensor]:
         return self.sampler(
             self.denoiser, sample_shape, y=y, n_steps=n_steps,
-            show_path=show_path, bond_order_bias=bond_order_bias,
-            exit_cap=exit_cap, temp_scales=temp_scales
+            show_path=show_path, no_atom_bias=no_atom_bias,
+            bond_order_bias=bond_order_bias, exit_cap=exit_cap,
+            temp_scales=temp_scales
         )
