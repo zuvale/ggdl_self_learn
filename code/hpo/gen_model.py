@@ -56,10 +56,10 @@ MOLFM_BOUNDS = [
     FloatVar(lb=-2.5, ub=0.3, name="no_atom_bias"),
     FloatVar(lb=-1.5, ub=-0.5, name="dbl_bias"),
     FloatVar(lb=-4.0, ub=-1.0, name="tpl_bias"),
-    FloatVar(lb=0.0, ub=1.0, name="ne_bias")
+    FloatVar(lb=0.0, ub=1.0, name="ne_bias"),
+    FloatVar(lb=0.0001, ub=0.01, name="learning_rate")
 ]
 CATFLOW_BOUNDS = MOLFM_BOUNDS + [
-    FloatVar(lb=0.0001, ub=0.01, name="learning_rate"),
     FloatVar(lb=0.0, ub=0.01, name="weight_decay"),
 ]
 DEFOG_BOUNDS = MOLFM_BOUNDS + [
@@ -369,7 +369,8 @@ class DeFoGMolSearchProblem(FMMolSearchProblem):
         return model
 
     def define_optimizer(self, model: nn.Module, hyperpars: Dict):
-        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+        optimizer = torch.optim.Adam(
+            model.parameters(), lr=hyperpars["learning_rate"])
         return optimizer
 
     def sample_graphs(
@@ -385,6 +386,7 @@ class DeFoGMolSearchProblem(FMMolSearchProblem):
 
                 batch = model.sample(
                     (n_samples,), y=y, n_steps=n_ode_steps,
+                    no_atom_bias=hyperpars["no_atom_bias"],
                     bond_order_bias=(
                         hyperpars["dbl_bias"], hyperpars["tpl_bias"],
                         hyperpars["ne_bias"]
