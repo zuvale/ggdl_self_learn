@@ -224,13 +224,18 @@ class FMMolSearchProblem(Problem):
     
     def obj_func(
         self, x: ndarray,
-        score_weights: Tuple[float, float, float]=(0.55, 0.25, 0.20)
+        score_weights: Tuple[float, float]=(0.30, 0.70)
     ) -> float:
         x_decoded = self.decode_solution(x)
 
         valid_connected = 0
         mean_size = 0
+        graph_atom_score = 0
+        graph_bond_score = 0
+        graph_nonempty = 0
+        min_atoms = 8
         target_size = 15
+        target_bonds = 15
         ring_ratio = 0
         for _ in range(self.n_replicates):
             model = self.define_model(x_decoded)
@@ -241,18 +246,38 @@ class FMMolSearchProblem(Problem):
 
             node_tokens = sampled_graphs.x.argmax(dim=-1)
             edge_tokens = sampled_graphs.edge_attr.argmax(dim=-1)
-            only_no_nodes = (
-                node_tokens != sampled_graphs.x.size(-1) - 1
-            ).sum().item() == 0
-            only_no_edges = (
-                edge_tokens != sampled_graphs.edge_attr.size(-1) - 1
-            ).sum().item() == 0
-            if only_no_nodes or only_no_edges:
-                del model
-                import gc
-                gc.collect()
-                torch.cuda.empty_cache()
-                return 1.0
+            no_atom_idx = sampled_graphs.x.size(-1) - 1
+            no_bond_idx = sampled_graphs.edge_attr.size(-1) - 1
+
+            real_node_mask = node_tokens != no_atom_idx
+            real_nodes_per_graph = torch.bincount(
+                sampled_graphs.batch,
+                weights=real_node_mask.float(),
+                minlength=sampled_graphs.num_graphs
+            )
+
+            row, col = sampled_graphs.edge_index
+            upper_mask = row < col
+            upper_graph = sampled_graphs.batch[row[upper_mask]]
+            real_edge_mask = (
+                (edge_tokens[upper_mask] != no_bond_idx)
+                & real_node_mask[row[upper_mask]]
+                & real_node_mask[col[upper_mask]]
+            )
+            real_edges_per_graph = torch.bincount(
+                upper_graph,
+                weights=real_edge_mask.float(),
+                minlength=sampled_graphs.num_graphs
+            )
+
+            graph_atom_score += torch.clamp(
+                real_nodes_per_graph / target_size, max=1.0).mean().item()
+            graph_bond_score += torch.clamp(
+                real_edges_per_graph / target_bonds, max=1.0).mean().item()
+            graph_nonempty += (
+                (real_nodes_per_graph >= min_atoms)
+                & (real_edges_per_graph > 0)
+            ).float().mean().item()
 
             KEK_EDGE_DICT = {
                 n: b
@@ -279,7 +304,7 @@ class FMMolSearchProblem(Problem):
                         mol_val = fix_nitro_charges(mol)
                         n_atoms = mol_val.GetNumAtoms(onlyExplicit=True)
                         smiles = Chem.MolToSmiles(mol_val)
-                        if n_atoms >= 8 and "." not in smiles:
+                        if n_atoms >= min_atoms and "." not in smiles:
                             fcv_size += n_atoms
                             fcv += 1
 
@@ -293,12 +318,24 @@ class FMMolSearchProblem(Problem):
 
         valid_connected /= self.n_replicates
         mean_size /= self.n_replicates
+        graph_atom_score /= self.n_replicates
+        graph_bond_score /= self.n_replicates
+        graph_nonempty /= self.n_replicates
         ring_ratio /= self.n_replicates
         size_score = min(mean_size / target_size, 1.0)
+
+        graph_score = (
+            0.45 * graph_atom_score
+                + 0.35 * graph_bond_score
+                + 0.20 * graph_nonempty
+        )
+        valid_score = valid_connected * (
+            0.70 * size_score
+                + 0.30 * ring_ratio
+        )
         score = (
-            score_weights[0] * valid_connected
-                + score_weights[1] * size_score
-                + score_weights[2] * ring_ratio
+            score_weights[0] * graph_score
+                + score_weights[1] * valid_score
         )
 
         obj_val = 1.0 - score
