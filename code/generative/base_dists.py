@@ -189,9 +189,9 @@ class MarginalGraphBase(DiscreteGraphBase):
     def _make_node_base(self):
         tokens = self.data.x.argmax(dim=-1)
         counts = tokens.bincount(minlength=self.n_node_states).float() + 1.0
-        return counts / counts.sum()
+        return (counts / counts.sum()).to(self.device)
 
     def _make_edge_base(self):
         tokens = self.data.edge_attr.argmax(dim=-1)
         counts = tokens.bincount(minlength=self.n_edge_states).float() + 1.0
-        return counts / counts.sum()
+        return (counts / counts.sum()).to(self.device)
