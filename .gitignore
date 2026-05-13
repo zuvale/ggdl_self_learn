@@ -1,8 +1,10 @@
 experiments/ml-tarflow
 experiments/iap-diffusion-labs
 experiments/aml_code
+experiments/gnn-project
 data/MNIST
 data/MUTAG
+data/HIV
 tmp
 **/__pycache__
 .vscode
