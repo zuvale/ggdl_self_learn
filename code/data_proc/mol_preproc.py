@@ -21,13 +21,23 @@ TU_MUTAG_CONFIG = {
 def create_processor_list(
     atom_name_vocab: List[str], bond_name_vocab: List[str],
     bond_type_vocab: List[Chem.rdchem.BondType], aromatic_idx: int,
-    max_n_atoms: int
+    max_n_atoms: int,
+    processors: List[str]=["kekulize", "pad_none", "pad_max", "to_int"]
 ) -> List[Callable]:
-    kek_wrapper = lambda dat: kekulize_graph(
-        dat, atom_name_vocab, bond_name_vocab, bond_type_vocab, aromatic_idx)
-    pad_wrapper = lambda dat: pad_nodes_and_edges_to_max(dat, max_n_atoms)
-    trafos = [
-        kek_wrapper, pad_graph_w_none_tokens, pad_wrapper, convert_to_int]
+    trafos = []
+    if "kekulize" in processors:
+        kek_wrapper = lambda dat: kekulize_graph(
+            dat, atom_name_vocab, bond_name_vocab, bond_type_vocab,
+            aromatic_idx
+        )
+        trafos.append(kek_wrapper)
+    if "pad_none" in processors:
+        trafos.append(pad_graph_w_none_tokens)
+    if "pad_max" in processors:
+        pad_wrapper = lambda dat: pad_nodes_and_edges_to_max(dat, max_n_atoms)
+        trafos.append(pad_wrapper)
+    if "to_int" in processors:
+        trafos.append(convert_to_int)
     return trafos
 
 def mol_from_graph(
