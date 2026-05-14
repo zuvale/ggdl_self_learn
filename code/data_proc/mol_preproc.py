@@ -21,7 +21,7 @@ TU_MUTAG_CONFIG = {
 def create_processor_list(
     atom_name_vocab: List[str], bond_name_vocab: List[str],
     bond_type_vocab: List[Chem.rdchem.BondType], aromatic_idx: int,
-    max_n_atoms: int,
+    max_n_atoms: int|None, size_increase: float|None,
     processors: List[str]=["kekulize", "pad_none", "pad_max", "to_int"]
 ) -> List[Callable]:
     trafos = []
@@ -34,7 +34,8 @@ def create_processor_list(
     if "pad_none" in processors:
         trafos.append(pad_graph_w_none_tokens)
     if "pad_max" in processors:
-        pad_wrapper = lambda dat: pad_nodes_and_edges_to_max(dat, max_n_atoms)
+        pad_wrapper = lambda dat: pad_nodes_and_edges_to_max(
+            dat, max_n_atoms=max_n_atoms, size_increase=size_increase)
         trafos.append(pad_wrapper)
     if "to_int" in processors:
         trafos.append(convert_to_int)
@@ -136,8 +137,15 @@ def pad_graph_w_none_tokens(data: Data) -> Data:
         }
     )
 
-def pad_nodes_and_edges_to_max(data: Data, max_n_atoms: int) -> Data:
+def pad_nodes_and_edges_to_max(
+    data: Data, max_n_atoms: int|None=None, size_increase: float|None=None
+) -> Data:
+    assert max_n_atoms is not None or size_increase is not None, (
+        "Either of max_n_atoms or size_increase has to be specified!")
     data = data.clone()
+    if size_increase:
+        import math
+        max_n_atoms = math.ceil(data.num_nodes * size_increase)
     
     # 1. Pad Nodes to "no-atom"-Type
     node_attr = data.x
