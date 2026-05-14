@@ -21,7 +21,7 @@ TU_MUTAG_CONFIG = {
 def create_processor_list(
     atom_name_vocab: List[str], bond_name_vocab: List[str],
     bond_type_vocab: List[Chem.rdchem.BondType], aromatic_idx: int,
-    max_n_atoms: int|None, size_increase: float|None,
+    max_n_atoms: int|None=None, size_increase: float|None=None,
     processors: List[str]=["kekulize", "pad_none", "pad_max", "to_int"]
 ) -> List[Callable]:
     trafos = []
