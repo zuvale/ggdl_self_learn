@@ -473,42 +473,6 @@ class ShortCutFM(FlowMatchingModel):
 
         return fm_idx, consist_idx
 
-class CatFlow_old(nn.Module):
-    def __init__(
-        self, base_dist: nn.Module, interpolant: nn.Module,
-          denoiser: nn.Module, sampler: nn.Module, node_tokens: int,
-          edge_tokens: int, max_n_nodes: int=35
-    ) -> None:
-        super().__init__()
-
-        self.base = base_dist
-        self.interpolant = interpolant
-        self.denoiser = denoiser
-        self.sampler = sampler
-        self.node_tokens = node_tokens
-        self.edge_tolens = edge_tokens
-        self.max_n_nodes = max_n_nodes
-
-    def forward(
-        self, batch: Data, edge_loss_weight: float=1.0,
-        edge_weights: torch.Tensor=torch.ones(4)
-    ) -> torch.Tensor:
-        t = torch.rand(len(batch), device=batch.x.device)
-        intpol_batch = self.interpolant(batch, t)
-
-        node_logits, edge_logits = self.denoiser(intpol_batch, t)
-
-        node_loss = F.cross_entropy(node_logits, batch.x.float())
-        edge_weights = edge_weights.to(batch.x.device)
-        triu_e_attr = extract_triu_edge_data(batch.edge_index, batch.edge_attr)
-        triu_e_logits = extract_triu_edge_data(batch.edge_index, edge_logits)
-        edge_loss = F.cross_entropy(
-            triu_e_logits, triu_e_attr.float(), weight=edge_weights)
-
-        loss = node_loss + edge_loss_weight * edge_loss
-
-        return loss
-
     @torch.inference_mode()
     def sample(
         self, sample_shape=(1,), n_steps: int=100, y: torch.Tensor|None=None,
