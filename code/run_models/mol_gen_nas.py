@@ -18,7 +18,7 @@ if __name__ == "__main__":
     from torch_geometric.loader import DataLoader
 
     from data_proc.mol_preproc import TU_MUTAG_CONFIG, create_processor_list
-    from gnn_.datasets_ import ProcessedInMemoryDataset
+    from gnn_.datasets_ import MUTAGMoleculeDataset, HIVMoleculeDataset
     from hpo.gen_model import (
         DEFOG_BOUNDS, CATFLOW_BOUNDS,
         DeFoGMolSearchProblem, ShortcutCatFlowMolSearchProblem
@@ -50,6 +50,10 @@ if __name__ == "__main__":
     common_parser.add_argument(
         "-sv", "--no-of-solver-steps", type=int, default=100,
         help="number of discrete solver steps (default: 100)"
+    )
+    common_parser.add_argument(
+        "-d", "--dataset", type=str, default="mutag",
+        help="the dataset to optimie the model for (default: mutag)"
     )
     common_parser.add_argument(
         "-s", "--random-seed", type=int, default=1,
@@ -107,20 +111,23 @@ if __name__ == "__main__":
         TU_MUTAG_CONFIG["aromatic_idx"], TU_MUTAG_CONFIG["max_n_atoms"]
     )
 
-    dataset = TUDataset(root=PROJECT_DIR / "data", name='MUTAG').to(DEVICE)
-    proc_dataset = ProcessedInMemoryDataset(dataset, trafos).to(DEVICE)
-
-    data_loader = DataLoader(proc_dataset, batch_size=BATCH_SIZE)
+    if cli_args.dataset == "mutag":
+        mutag_raw = TUDataset(root=PROJECT_DIR / "data", name='MUTAG').to(DEVICE)
+        dataset = MUTAGMoleculeDataset(
+            mutag_raw, PROJECT_DIR / "data" / "MUTAG_MOL", size_increase=1.4,
+            force_reload=True
+        ).to(DEVICE)
+        data_loader = DataLoader(dataset, batch_size=BATCH_SIZE)
 
     if cli_args.model_type == "defog":
         problem = DeFoGMolSearchProblem(
-            DEFOG_BOUNDS, data_set=proc_dataset, data_loader=data_loader,
+            DEFOG_BOUNDS, data_set=dataset, data_loader=data_loader,
             n_epochs=EPOCHS, n_solv_steps=SOLV_STEPS, n_samples=100,
             device=DEVICE
         )
     if cli_args.model_type == "catflow":
         problem = ShortcutCatFlowMolSearchProblem(
-            CATFLOW_BOUNDS, data_set=proc_dataset, data_loader=data_loader,
+            CATFLOW_BOUNDS, data_set=dataset, data_loader=data_loader,
             n_epochs=EPOCHS, n_solv_steps=SOLV_STEPS, n_samples=100,
             device=DEVICE
         )

@@ -1,3 +1,4 @@
+import math
 from mealpy import Problem, FloatVar, IntegerVar, StringVar, MixedSetVar
 from mealpy.utils.space import BaseVar
 from numpy import ndarray
@@ -10,7 +11,7 @@ from typing import Dict, Iterable, Tuple
 
 from data_proc.mol_preproc import (
     TU_MUTAG_CONFIG, batch_to_mols, fix_nitro_charges)
-from gnn_.architectures import GNNDenoiser
+from gnn_.architectures import GNNDenoiserCrossAttended
 from generative.base_dists import GaussianBase, MarginalGraphBase
 from generative.diffusion import (
     ConstantLinearSchedule, LearnableLinearSchedule,
@@ -45,8 +46,7 @@ VDM_DIFFUSION_BOUNDS = DIFFUSION_BOUNDS + [
 MOLFM_BOUNDS = [
     MixedSetVar(valid_sets=[32, 48, 64, 96], name="node_hidden"),
     MixedSetVar(valid_sets=[32, 48, 64, 96], name="edge_hidden"),
-    MixedSetVar(valid_sets=[32, 48, 64, 96], name="time_emb_size"),
-    MixedSetVar(valid_sets=[32, 48, 64, 96], name="class_emb_size"),
+    MixedSetVar(valid_sets=[32, 48, 64, 96], name="emb_size"),
     IntegerVar(lb=1, ub=5, name="n_layers"),
     FloatVar(lb=0.5, ub=4.0, name="lambda_eloss"),
     FloatVar(lb=0.02, ub=0.4, name="no_atom_weight"),
@@ -57,7 +57,8 @@ MOLFM_BOUNDS = [
     FloatVar(lb=-1.5, ub=-0.5, name="dbl_bias"),
     FloatVar(lb=-4.0, ub=-1.0, name="tpl_bias"),
     FloatVar(lb=0.0, ub=1.0, name="ne_bias"),
-    FloatVar(lb=0.0001, ub=0.01, name="learning_rate")
+    FloatVar(lb=0.0001, ub=0.01, name="learning_rate"),
+    MixedSetVar(valid_sets=[1, 2, 4, 8], name="ca_heads")
 ]
 CATFLOW_BOUNDS = MOLFM_BOUNDS + [
     FloatVar(lb=0.0, ub=0.01, name="weight_decay"),
@@ -279,15 +280,9 @@ class FMMolSearchProblem(Problem):
                 & (real_edges_per_graph > 0)
             ).float().mean().item()
 
-            KEK_EDGE_DICT = {
-                n: b
-                for n, b in TU_MUTAG_CONFIG["edge_dict"].items()
-                if n != "aromatic"
-            }
-            KEK_EDGE_LIST_RDK = list(KEK_EDGE_DICT.values())
             sampled_mols = batch_to_mols(
-                sampled_graphs, TU_MUTAG_CONFIG["node_list"],
-                KEK_EDGE_LIST_RDK, TU_MUTAG_CONFIG["max_n_atoms"]
+                sampled_graphs, self.data_set.atom_vocab,
+                self.data_set.bond_vocab, self.data_set.max_n_atoms
             )
 
             del model
@@ -380,27 +375,34 @@ class DeFoGMolSearchProblem(FMMolSearchProblem):
     def define_model(self, hyperpars: Dict) -> nn.Module:
         base_dist = MarginalGraphBase(self.data_set, device=self.device)
         noiser = LinearDiscreteNoiser(base_dist)
-        n_atom_tokens, n_bond_tokens = 8, 4
+        n_atom_tokens, n_bond_tokens = (
+            len(self.data_set.atom_vocab)+1, len(self.data_set.bond_vocab)+1)
         node_hidden_size = hyperpars["node_hidden"]
         edge_hidden_size = hyperpars["edge_hidden"]
-        time_emb_size = hyperpars["time_emb_size"]
-        class_emb_size = hyperpars["class_emb_size"]
+        emb_size = hyperpars["emb_size"]
         n_classes = 2
         n_update = hyperpars["n_layers"]
-        denoiser = GNNDenoiser(
+        denoiser = GNNDenoiserCrossAttended(
             n_atom_tokens, n_bond_tokens, node_hidden_size, edge_hidden_size,
-            time_emb_size, class_emb_size, n_classes, n_update,
-            message_passing="pna_conv", loader=self.data_loader
+            emb_size, n_layers=n_update, message_passing="pna_conv",
+            ca_heads=hyperpars["ca_heads"], loader=self.data_loader,
+            conditioning_args=[
+                ("cont_sine_pe", {"embedding_dim": emb_size}),
+                ("class", {"embedding_dim": emb_size, "n_classes": n_classes}),
+                ("scalar_fourier", {"embedding_dim": emb_size}),
+                ("scalar_fourier", {"embedding_dim": emb_size}),
+                ("scalar_fourier", {"embedding_dim": emb_size})
+            ]
         ).to(self.device)
         sampler = CTMCSampler(
             base_dist, LinearDiscreteRateMatrix(
                 base_dist, n_atom_tokens, n_bond_tokens).to(self.device),
-            n_atom_tokens, n_bond_tokens, TU_MUTAG_CONFIG["max_n_atoms"],
+            n_atom_tokens, n_bond_tokens, self.data_set.max_n_atoms,
             device=self.device
         )
         model = DeFoG(
             base_dist, noiser, denoiser, sampler, n_atom_tokens, n_bond_tokens,
-            TU_MUTAG_CONFIG["max_n_atoms"]
+            self.data_set.max_n_atoms
         ).to(self.device)
 
         return model
@@ -420,9 +422,31 @@ class DeFoGMolSearchProblem(FMMolSearchProblem):
                     torch.ones((n_samples//2,), dtype=torch.long),
                     torch.zeros((n_samples//2,), dtype=torch.long),
                 ))
+                conditioning = torch.cat(
+                    [
+                        (
+                            torch.log1p(torch.randint(
+                                1, self.data_set.max_n_atoms, (n_samples, 1)))
+                                / math.log1p(self.data_set.max_n_atoms)
+                        ),
+                        (
+                            torch.log1p(torch.randint(
+                                1, self.data_set.max_n_heteroatoms,
+                                (n_samples, 1)
+                            ))
+                                / math.log1p(self.data_set.max_n_heteroatoms)
+                        ),
+                        (
+                            torch.log1p(torch.randint(
+                                1, self.data_set.max_n_rings, (n_samples, 1)))
+                                / math.log1p(self.data_set.max_n_rings)
+                        )
+                    ], dim=1
+                ).to(self.device)
 
                 batch = model.sample(
                     (n_samples,), y=y, n_steps=n_ode_steps,
+                    conditioning=conditioning,
                     no_atom_bias=hyperpars["no_atom_bias"],
                     bond_order_bias=(
                         hyperpars["dbl_bias"], hyperpars["tpl_bias"],
