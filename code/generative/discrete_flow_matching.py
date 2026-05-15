@@ -166,12 +166,13 @@ class CTMCSampler(nn.Module):
     def forward(
         self, denoiser: nn.Module,
         sample_shape: Tuple[int]=(1,), n_steps: int=100,
-        y: torch.Tensor|None=None, show_path: bool=False,
-        t_eval: Tuple[int|float, int|float]=(0., 1.), **kwargs
+        y: torch.Tensor|None=None, conditioning: torch.Tensor|None=None,
+        show_path: bool=False, t_eval: Tuple[int|float, int|float]=(0., 1.),
+        **kwargs
     ) -> Data|List[Data]:
         batch = graph_initial_samples(
             self.base, sample_shape[0], self.max_n_nodes, y=y,
-            device=self.device
+            conditioning=conditioning, device=self.device
         )
         if show_path:
             path_samples = [batch]
@@ -341,13 +342,14 @@ class DeFoG(nn.Module):
     @torch.inference_mode()
     def sample(
         self, sample_shape=(1,), n_steps: int=100, y: torch.Tensor|None=None,
+        conditioning: torch.Tensor|None=None,
         show_path: bool=False, no_atom_bias: float|None=None,
         bond_order_bias: Tuple[float, float, float]=(0., 0., 0.),
         exit_cap: float=0.5, temp_scales: Tuple[float, float]=(1., 1.)
     ) -> torch.Tensor|Tuple[torch.Tensor, torch.Tensor]:
         return self.sampler(
-            self.denoiser, sample_shape, y=y, n_steps=n_steps,
-            show_path=show_path, no_atom_bias=no_atom_bias,
+            self.denoiser, sample_shape, y=y, conditioning=conditioning,
+            n_steps=n_steps, show_path=show_path, no_atom_bias=no_atom_bias,
             bond_order_bias=bond_order_bias, exit_cap=exit_cap,
             temp_scales=temp_scales
         )

@@ -8,7 +8,8 @@ from typing import Tuple
 
 def graph_initial_samples(
     base_dist: nn.Module, batch_size: int, max_n_nodes: int,
-    y: torch.Tensor|None=None, device: str="cpu"
+    y: torch.Tensor|None=None, device: str="cpu",
+    conditioning: torch.Tensor|None=None
 ) -> Data:
     data_list = []
 
@@ -32,6 +33,8 @@ def graph_initial_samples(
             y=y[i].view(1) if y is not None else None,
             num_nodes=max_n_nodes,
         )
+        if conditioning is not None:
+            data.conditioning = conditioning[i].view(1, -1)
 
         data_list.append(data)
 
