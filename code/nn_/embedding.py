@@ -79,3 +79,31 @@ class ClassEmbedding(nn.Module):
             c = self.enc.mean(dim=0).unsqueeze(0)
         
         return c
+
+class ScalarFourierEmbedding(nn.Module):
+    def __init__(self, embedding_dim: int, n_freqs: int=16) -> None:
+        super().__init__()
+        freqs = 2.0 ** torch.arange(n_freqs).float()
+        self.register_buffer("freqs", freqs)
+
+        self.mlp = nn.Sequential(
+            nn.Linear(1 + 2 * n_freqs, embedding_dim),
+            nn.SiLU(),
+            nn.Linear(embedding_dim, embedding_dim),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: [batch], assumed normalized to roughly [0, 1]
+        x = x[:, None]
+        angles = 2 * torch.pi * x * self.freqs[None, :]
+        feats = torch.cat([x, torch.sin(angles), torch.cos(angles)], dim=-1)
+        return self.mlp(feats)
+
+def define_embedding(name: str, **kwargs) -> nn.Module:
+    match name:
+        case "class":
+            return ClassEmbedding(**kwargs)
+        case "cont_sine_pe":
+            return ContinuousSinusoidalPE(**kwargs)
+        case "scalar_fourier":
+            return ScalarFourierEmbedding(**kwargs)
