@@ -4,6 +4,7 @@
 from copy import deepcopy
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from typing import List
 from nn_.mlp import MLP
 from nn_.cnn import CNN2DToFC, TCNN2DFromFC, UNet
@@ -475,3 +476,58 @@ def _make_time_embedding(
         return ContinuousSinusoidalPE(emb_dim, time_scale=tscale)
     else:
         return DiscreteSinusoidalPE(emb_dim, tsteps)
+
+class CrossAttentionHead(nn.Module):
+    def __init__(self, in_size: int, out_size: int) -> None:
+        super().__init__()
+
+        self.query = nn.Linear(in_size, out_size, bias=False)
+        self.key = nn.Linear(in_size, out_size, bias=False)
+        self.value = nn.Linear(in_size, out_size, bias=False)
+
+    def forward(
+        self, x: torch.Tensor, conditioning: torch.Tensor
+    ) -> torch.Tensor:
+        # x           : [N, H]
+        # conditioning: [N, C, H]
+        Q = self.query(x).unsqueeze(1)                           # [N, 1, D]
+        K, V = self.key(conditioning), self.value(conditioning)  # [N, C, D]
+
+        w = Q @ K.transpose(-2, -1) * (K.size(-1)**(-0.5))       # [N, 1, C]
+        w = F.softmax(w, dim=-1)
+
+        out = w @ V                                              # [N, 1, D]
+        return out.squeeze(1)                                    # [N, D]
+
+class CrossAttentionBlock(nn.Module):
+    def __init__(
+        self, n_heads: int, hidden_size: int, embedding_size: int,
+        *embeddings: nn.Module|nn.Sequential, fc_projection_mult: int=4,
+        act_fun: nn.Module=nn.ReLU
+    ) -> None:
+        super().__init__()
+        assert hidden_size % n_heads == 0, (
+            "no. of heads must evenly divide hidden size!")
+        head_size = hidden_size // n_heads
+
+        self.heads = nn.ModuleList([
+            CrossAttentionHead(hidden_size, head_size) for _ in range(n_heads)
+        ])
+        self.embs = nn.ModuleList(embeddings)
+        self.emb_map = nn.Linear(embedding_size, hidden_size)
+
+        self.fc_head = MLP(
+            hidden_size, hidden_size, [hidden_size*fc_projection_mult],
+            act_funs=[act_fun, None]
+        )
+
+    def forward(
+        self, x: torch.Tensor, *conditions: torch.Tensor, cat_dim: int=1
+    ) -> torch.Tensor:
+        conds = [emb(c).unsqueeze(1) for emb, c in zip(self.embs, conditions)]
+        cond = torch.cat(conds, dim=cat_dim)                    # [N, C, E]
+        cond = self.emb_map(cond)                               # [N, C, H]
+
+        head_out = torch.cat([h(x, cond) for h in self.heads], dim=-1)
+        out = self.fc_head(head_out)
+        return out + x
