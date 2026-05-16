@@ -14,6 +14,42 @@ from data_proc.mol_preproc import (
     TU_MUTAG_CONFIG, create_processor_list, mol_from_graph)
 
 
+def _log_conditioning(
+    values: Tuple[int|float|torch.Tensor, ...],
+    max_values: Tuple[int|float, ...], device: torch.device|str|None=None
+) -> torch.Tensor:
+    vals = torch.stack([
+        torch.as_tensor(v, dtype=torch.float, device=device)
+        for v in values
+    ])
+    denoms = torch.tensor(
+        [math.log1p(max(1, int(m))) for m in max_values],
+        dtype=torch.float,
+        device=vals.device,
+    )
+    return (torch.log1p(vals.clamp_min(0)) / denoms).view(1, -1)
+
+def _maybe_repeat(
+    conditioning: torch.Tensor, repeat: int|None=None
+) -> torch.Tensor:
+    if repeat is None:
+        return conditioning
+    return conditioning.repeat(repeat, 1)
+
+def _capacity_for_n_atoms(
+    n_atoms: int, size_increase: float|None, max_n_atoms: int,
+    max_capacity: int=0, clamp: bool=True
+) -> int:
+    if size_increase is not None:
+        capacity = math.ceil(n_atoms * size_increase)
+    else:
+        capacity = max_n_atoms
+
+    capacity = max(n_atoms, capacity)
+    if clamp and max_capacity:
+        capacity = min(capacity, max_capacity)
+    return capacity
+
 class ProcessedInMemoryDataset(InMemoryDataset):
     def __init__(
         self, base_dataset: Dataset, processors=None, clone: bool=True
@@ -74,6 +110,14 @@ class MUTAGMoleculeDataset(InMemoryDataset):
         self.load(self.processed_paths[0])
         metadata = torch.load(self.processed_paths[1], weights_only=False)
         self.__dict__.update(metadata)
+        self.bond_token_names = getattr(
+            self, "bond_token_names", self.kek_edge_name_vocab + ["no_bond"])
+        if len(getattr(self, "conditioning_names", [])) != 3:
+            self.conditioning_names = [
+                "log_real_n_atoms",
+                "log_n_heteroatoms",
+                "log_n_rings",
+            ]
 
     @property
     def raw_file_names(self) -> List[str]:
@@ -118,23 +162,8 @@ class MUTAGMoleculeDataset(InMemoryDataset):
             self.max_capacity = max(self.max_capacity, graph.num_nodes)
 
             n_atoms, n_heteroatoms, n_rings = graph.conditioning_raw.flatten()
-            hetero_frac = n_heteroatoms / n_atoms.clamp_min(1)
-
-            graph.conditioning = torch.tensor([[
-                torch.log1p(n_atoms) / math.log1p(max(1, self.max_real_n_atoms)),
-                #(
-                #    torch.log1p(n_heteroatoms)
-                #        / math.log1p(max(1, self.max_n_heteroatoms))
-                #),
-                (
-                    torch.log1p(n_heteroatoms)
-                        / math.log1p(max(1, self.max_real_n_atoms))
-                ),
-                #hetero_frac,
-                torch.log1p(n_rings) / math.log1p(max(1, self.max_n_rings)),
-                #torch.log1p(torch.tensor(graph.num_nodes, dtype=torch.float))
-                #    / math.log1p(max(1, self.max_n_atoms)),
-            ]], dtype=torch.float)
+            graph.conditioning = self.encode_conditioning(
+                n_atoms, n_heteroatoms, n_rings)
 
             proc_graphs.append(graph)
 
@@ -151,6 +180,33 @@ class MUTAGMoleculeDataset(InMemoryDataset):
 
         return torch.tensor(
             [n_atoms, n_heteroatoms, n_rings], dtype=torch.float)
+
+    def encode_conditioning(
+        self, n_atoms: int|float|torch.Tensor,
+        n_heteroatoms: int|float|torch.Tensor, n_rings: int|float|torch.Tensor,
+        device: torch.device|str|None=None,
+    ) -> torch.Tensor:
+        return _log_conditioning(
+            (n_atoms, n_heteroatoms, n_rings),
+            (self.max_real_n_atoms, self.max_n_heteroatoms, self.max_n_rings),
+            device=device,
+        )
+
+    def sample_conditioning(
+        self, n_atoms: int, n_heteroatoms: int, n_rings: int,
+        repeat: int|None=None, device: torch.device|str|None=None,
+    ) -> torch.Tensor:
+        return _maybe_repeat(
+            self.encode_conditioning(
+                n_atoms, n_heteroatoms, n_rings, device=device),
+            repeat=repeat,
+        )
+
+    def capacity_for_n_atoms(self, n_atoms: int, clamp: bool=True) -> int:
+        return _capacity_for_n_atoms(
+            n_atoms, self.size_increase, self.max_n_atoms, self.max_capacity,
+            clamp=clamp,
+        )
 
     def _num_rings(self, graph: Data) -> int:
         try:
@@ -185,12 +241,12 @@ class MUTAGMoleculeDataset(InMemoryDataset):
             "max_n_heteroatoms": self.max_n_heteroatoms,
             "max_n_rings": self.max_n_rings,
             "max_capacity": self.max_capacity,
+            "size_increase": self.size_increase,
+            "bond_token_names": self.kek_edge_name_vocab + ["no_bond"],
             "conditioning_names": [
                 "log_real_n_atoms",
                 "log_n_heteroatoms",
-                "heteroatom_fraction",
                 "log_n_rings",
-                "log_capacity",
             ],
         }
 
@@ -200,7 +256,8 @@ class MUTAGMoleculeDataset(InMemoryDataset):
 class HIVMoleculeDataset(InMemoryDataset):
     def __init__(
         self, root: str|Path, filename: str, transform=None,
-        pre_transform=None, size_increase: float|None=None
+        pre_transform=None, size_increase: float|None=None,
+        force_reload: bool=False,
     ) -> None:
         self.filename = filename
 
@@ -208,12 +265,18 @@ class HIVMoleculeDataset(InMemoryDataset):
         self.bond_to_idx = {}
         self.n_atom_types = 0
         self.n_bond_types = 0
+        self.n_atom_tokens = 0
+        self.n_bond_tokens = 0
         self.max_n_atoms = 0
+        self.max_n_heteroatoms = 0
         self.max_n_rings = 0
+        self.max_capacity = 0
         self.size_increase = size_increase
 
         super().__init__(
-            root, transform=transform, pre_transform=pre_transform)
+            root, transform=transform, pre_transform=pre_transform,
+            force_reload=force_reload,
+        )
         
         self.load(self.processed_paths[0])
         metadata = torch.load(self.processed_paths[1], weights_only=False)
@@ -221,11 +284,25 @@ class HIVMoleculeDataset(InMemoryDataset):
         self.bond_to_idx = metadata["bond_to_idx"]
         self.n_atom_types = metadata["n_atom_types"]
         self.n_bond_types = metadata["n_bond_types"]
+        self.n_atom_tokens = metadata.get("n_atom_tokens", self.n_atom_types + 1)
+        self.n_bond_tokens = metadata.get("n_bond_tokens", self.n_bond_types + 1)
         self.max_n_atoms = metadata["max_n_atoms"]
+        self.max_n_heteroatoms = metadata.get(
+            "max_n_heteroatoms", self.max_n_atoms)
         self.max_n_rings = metadata["max_n_rings"]
+        self.max_capacity = metadata.get(
+            "max_capacity", self._infer_max_capacity())
+        self.size_increase = metadata.get("size_increase", self.size_increase)
 
-        self.atom_vocab = self.define_atom_vocab(self.atom_to_idx)
-        self.bond_vocab = list(self.bond_to_idx.keys())
+        self.atom_vocab = metadata.get(
+            "atom_vocab", self.define_atom_vocab(self.atom_to_idx))
+        self.bond_vocab = metadata.get("bond_vocab", list(self.bond_to_idx.keys()))
+        self.bond_token_names = metadata.get(
+            "bond_token_names", self.define_bond_token_names(self.bond_vocab))
+        self.conditioning_names = metadata.get(
+            "conditioning_names",
+            ["log_real_n_atoms", "log_n_heteroatoms", "log_n_rings"],
+        )
 
     @property
     def raw_file_names(self) -> str:
@@ -253,7 +330,7 @@ class HIVMoleculeDataset(InMemoryDataset):
             raw_graphs.append(Data(
                 x=x, edge_index=edge_index, edge_attr=edge_attr,
                 y=torch.tensor(row["HIV_active"], dtype=torch.long),
-                conditioning=conditioning
+                conditioning_raw=conditioning.view(1, -1),
             ))
         
         atom_vocab = self.define_atom_vocab(self.atom_to_idx)
@@ -272,24 +349,36 @@ class HIVMoleculeDataset(InMemoryDataset):
             graph.edge_attr = F.one_hot(
                 graph.edge_attr, num_classes=self.n_bond_types).float()
             
-            n_atoms, n_hetatoms, n_rings = graph.conditioning
-            norm_conditioning = torch.tensor([[
-                torch.log1p(n_atoms)/math.log1p(self.max_n_atoms),
-                torch.log1p(n_hetatoms)/math.log1p(self.max_n_atoms),
-                torch.log1p(n_rings)/math.log1p(self.max_n_rings)
-            ]], dtype=torch.float)
-            graph.conditioning = norm_conditioning
+            n_atoms, n_hetatoms, n_rings = graph.conditioning_raw.flatten()
+            graph.conditioning = self.encode_conditioning(
+                n_atoms, n_hetatoms, n_rings)
 
-            proc_graphs.append(processors(graph))
+            graph = processors(graph)
+            self.max_capacity = max(self.max_capacity, graph.num_nodes)
+            proc_graphs.append(graph)
 
         self.save(proc_graphs, self.processed_paths[0])
         torch.save({
             "atom_to_idx": self.atom_to_idx,
             "bond_to_idx": self.bond_to_idx,
+            "atom_vocab": self.define_atom_vocab(self.atom_to_idx),
+            "bond_vocab": list(self.bond_to_idx.keys()),
+            "bond_token_names": self.define_bond_token_names(
+                list(self.bond_to_idx.keys())),
             "n_atom_types": self.n_atom_types,
             "n_bond_types": self.n_bond_types,
+            "n_atom_tokens": self.n_atom_types + 1,
+            "n_bond_tokens": self.n_bond_types + 1,
             "max_n_atoms": self.max_n_atoms,
-            "max_n_rings": self.max_n_rings
+            "max_n_heteroatoms": self.max_n_heteroatoms,
+            "max_n_rings": self.max_n_rings,
+            "max_capacity": self.max_capacity,
+            "size_increase": self.size_increase,
+            "conditioning_names": [
+                "log_real_n_atoms",
+                "log_n_heteroatoms",
+                "log_n_rings",
+            ],
         }, self.processed_paths[1])
 
     def _node_features(self, mol) -> torch.Tensor:
@@ -325,10 +414,39 @@ class HIVMoleculeDataset(InMemoryDataset):
         n_atoms = mol.GetNumAtoms()
         n_heteroatoms = rdMolDescriptors.CalcNumHeteroatoms(mol)
         n_rings = rdMolDescriptors.CalcNumRings(mol)
+        if n_heteroatoms > self.max_n_heteroatoms:
+            self.max_n_heteroatoms = n_heteroatoms
         if n_rings > self.max_n_rings:
             self.max_n_rings = n_rings
         return torch.tensor(
             [n_atoms, n_heteroatoms, n_rings], dtype=torch.float)
+
+    def encode_conditioning(
+        self, n_atoms: int|float|torch.Tensor,
+        n_heteroatoms: int|float|torch.Tensor, n_rings: int|float|torch.Tensor,
+        device: torch.device|str|None=None,
+    ) -> torch.Tensor:
+        return _log_conditioning(
+            (n_atoms, n_heteroatoms, n_rings),
+            (self.max_n_atoms, self.max_n_heteroatoms, self.max_n_rings),
+            device=device,
+        )
+
+    def sample_conditioning(
+        self, n_atoms: int, n_heteroatoms: int, n_rings: int,
+        repeat: int|None=None, device: torch.device|str|None=None,
+    ) -> torch.Tensor:
+        return _maybe_repeat(
+            self.encode_conditioning(
+                n_atoms, n_heteroatoms, n_rings, device=device),
+            repeat=repeat,
+        )
+
+    def capacity_for_n_atoms(self, n_atoms: int, clamp: bool=True) -> int:
+        return _capacity_for_n_atoms(
+            n_atoms, self.size_increase, self.max_n_atoms, self.max_capacity,
+            clamp=clamp,
+        )
 
     def _token_id(self, vocab: Dict, token: int|float) -> Dict:
         if token not in vocab:
@@ -342,3 +460,25 @@ class HIVMoleculeDataset(InMemoryDataset):
     def define_atom_vocab(idx_dict: Dict[int, int]) -> List[str]:
         pt = Chem.GetPeriodicTable()
         return [pt.GetElementSymbol(a_num) for a_num in idx_dict.keys()]
+
+    @staticmethod
+    def define_bond_token_names(
+        bond_vocab: List[Chem.rdchem.BondType],
+    ) -> List[str]:
+        name_map = {
+            Chem.rdchem.BondType.SINGLE: "single",
+            Chem.rdchem.BondType.DOUBLE: "double",
+            Chem.rdchem.BondType.TRIPLE: "triple",
+            Chem.rdchem.BondType.AROMATIC: "aromatic",
+        }
+        names = [
+            name_map.get(bond_type, f"bond_{int(bond_type)}")
+            for bond_type in bond_vocab
+        ]
+        return names + ["no_bond"]
+
+    def _infer_max_capacity(self) -> int:
+        if hasattr(self, "slices") and self.slices and "x" in self.slices:
+            n_nodes = self.slices["x"][1:] - self.slices["x"][:-1]
+            return int(n_nodes.max())
+        return self.max_n_atoms
