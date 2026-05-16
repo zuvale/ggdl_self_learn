@@ -201,7 +201,10 @@ def convert_to_int(data: Data) -> Data:
 
     return batch
 
-def clean_up_graph(data: Data, max_n_atoms: int) -> Data:
+def clean_up_graph(data: Data, max_n_atoms: int|None=None) -> Data:
+    if max_n_atoms is None:
+        max_n_atoms = data.num_nodes
+
     x = data.x.clone()
     edge_index = data.edge_index.clone()
     edge_attr = data.edge_attr.clone()
@@ -249,7 +252,7 @@ def clean_up_graph(data: Data, max_n_atoms: int) -> Data:
 
 def batch_to_mols(
     batch: Data, atom_vocab: List[str],
-    bond_type_vocab: List[Chem.rdchem.BondType], max_n_atoms: int
+    bond_type_vocab: List[Chem.rdchem.BondType], max_n_atoms: int|None=None
 ) -> List:
     indv_graphs = []
     edge_graph = batch.batch[batch.edge_index[0]]
