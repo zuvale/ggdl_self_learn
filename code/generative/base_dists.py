@@ -20,10 +20,13 @@ def graph_initial_samples(
     edge_index = torch.cat(
         [triu_edge_index, triu_edge_index.flip(0)], dim=1)
 
+    node_samples, upper_edge_samples = base_dist.sample(
+        node_sample_shape=(batch_size, max_n_nodes),
+        edge_sample_shape=(batch_size, num_edges),
+    )
+
     for i in range(batch_size):
-        x, upper_edge_attr = base_dist.sample(
-            node_sample_shape=(max_n_nodes,), edge_sample_shape=(num_edges,)
-        )
+        x, upper_edge_attr = node_samples[i], upper_edge_samples[i]
         
         edge_attr = torch.cat([upper_edge_attr, upper_edge_attr], dim=0)
         data = Data(
@@ -189,12 +192,23 @@ class UniformGraphBase(DiscreteGraphBase):
             [1/n_states]*n_states, dtype=torch.float32, device=self.device)
 
 class MarginalGraphBase(DiscreteGraphBase):
+    def __init__(self, dataset: InMemoryDataset, device: str="cpu") -> None:
+        super().__init__(dataset, device=device)
+        self.register_buffer("node_probs", self._estimate_node_probs())
+        self.register_buffer("edge_probs", self._estimate_edge_probs())
+
     def _make_node_base(self):
+        return self.node_probs
+
+    def _make_edge_base(self):
+        return self.edge_probs
+
+    def _estimate_node_probs(self):
         tokens = self.data.x.argmax(dim=-1)
         counts = tokens.bincount(minlength=self.n_node_states).float() + 1.0
         return (counts / counts.sum()).to(self.device)
 
-    def _make_edge_base(self):
+    def _estimate_edge_probs(self):
         tokens = self.data.edge_attr.argmax(dim=-1)
         counts = tokens.bincount(minlength=self.n_edge_states).float() + 1.0
         return (counts / counts.sum()).to(self.device)
