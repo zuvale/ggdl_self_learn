@@ -146,7 +146,7 @@ class CTMCSampler(nn.Module):
         self, base_dist: nn.Module, rate_matrix : nn.Module,
         node_classes: int, edge_classes: int, max_nodes: int,
         update_method: str="euler", device: str="cpu",
-        bond_types: List["str"]=["single", "double", "triple", "no_bond"]
+        bond_types: List[str]|None=None
     ) -> None:
         super().__init__()
         self.base = base_dist
@@ -160,7 +160,10 @@ class CTMCSampler(nn.Module):
                 d, b, t, h, u, self.nc_nodes, self.nc_edges, **kwargs)
         
         self.device = device
-        self.bond_types = bond_types
+        self.bond_types = bond_types or self._default_bond_types(edge_classes)
+        self.bond_type_to_idx = {
+            name: i for i, name in enumerate(self.bond_types)
+        }
     
     @torch.inference_mode
     def forward(
@@ -168,10 +171,12 @@ class CTMCSampler(nn.Module):
         sample_shape: Tuple[int]=(1,), n_steps: int=100,
         y: torch.Tensor|None=None, conditioning: torch.Tensor|None=None,
         show_path: bool=False, t_eval: Tuple[int|float, int|float]=(0., 1.),
+        max_n_nodes: int|None=None,
         **kwargs
     ) -> Data|List[Data]:
+        sample_max_nodes = max_n_nodes or self.max_n_nodes
         batch = graph_initial_samples(
-            self.base, sample_shape[0], self.max_n_nodes, y=y,
+            self.base, sample_shape[0], sample_max_nodes, y=y,
             conditioning=conditioning, device=self.device
         )
         if show_path:
@@ -205,13 +210,13 @@ class CTMCSampler(nn.Module):
         h_node, h_edge = h[batch.batch][:, None], h[upper_graph][:, None]
 
         node_logits, edge_logits = denoiser(batch, t)
-        if no_atom_bias:
+        if no_atom_bias is not None:
             node_logits[:, -1] += no_atom_bias
         if bond_order_bias:
             dbl_b, tpl_b, ne_b = bond_order_bias
-            edge_logits[:, self.bond_types.index("double")] += dbl_b
-            edge_logits[:, self.bond_types.index("triple")] += tpl_b
-            edge_logits[:, self.bond_types.index("no_bond")] += ne_b
+            self._add_edge_bias(edge_logits, "double", dbl_b)
+            self._add_edge_bias(edge_logits, "triple", tpl_b)
+            self._add_edge_bias(edge_logits, "no_bond", ne_b)
         triu_e_logits = extract_triu_edge_data(e_idx, edge_logits)
         node_final, triu_e_final = self.endpoint_sampling(
             node_logits, triu_e_logits, node_temp=temp_scales[0],
@@ -299,6 +304,27 @@ class CTMCSampler(nn.Module):
 
         return batch, t
 
+    @staticmethod
+    def _default_bond_types(edge_classes: int) -> List[str]:
+        if edge_classes == 4:
+            return ["single", "double", "triple", "no_bond"]
+        if edge_classes >= 5:
+            middle = [f"bond_{i}" for i in range(3, edge_classes - 1)]
+            return ["single", "double", "triple"] + middle + ["no_bond"]
+        return [f"bond_{i}" for i in range(edge_classes - 1)] + ["no_bond"]
+
+    def _add_edge_bias(
+        self, edge_logits: torch.Tensor, bond_type: str, bias: float
+    ) -> None:
+        if bias == 0:
+            return
+        if bond_type not in self.bond_type_to_idx:
+            known = ", ".join(self.bond_types)
+            raise ValueError(
+                f"Unknown bond type '{bond_type}'. Known types: {known}"
+            )
+        edge_logits[:, self.bond_type_to_idx[bond_type]] += bias
+
 class DeFoG(nn.Module):
     def __init__(
         self, base_dist: nn.Module, noising_process: nn.Module,
@@ -312,6 +338,7 @@ class DeFoG(nn.Module):
         self.denoiser = denoiser
         self.sampler = sampler
         self.node_tokens = node_tokens
+        self.edge_tokens = edge_tokens
         self.edge_tolens = edge_tokens
         self.max_n_nodes = max_n_nodes
     
@@ -345,11 +372,12 @@ class DeFoG(nn.Module):
         conditioning: torch.Tensor|None=None,
         show_path: bool=False, no_atom_bias: float|None=None,
         bond_order_bias: Tuple[float, float, float]=(0., 0., 0.),
-        exit_cap: float=0.5, temp_scales: Tuple[float, float]=(1., 1.)
+        exit_cap: float=0.5, temp_scales: Tuple[float, float]=(1., 1.),
+        max_n_nodes: int|None=None
     ) -> torch.Tensor|Tuple[torch.Tensor, torch.Tensor]:
         return self.sampler(
             self.denoiser, sample_shape, y=y, conditioning=conditioning,
             n_steps=n_steps, show_path=show_path, no_atom_bias=no_atom_bias,
             bond_order_bias=bond_order_bias, exit_cap=exit_cap,
-            temp_scales=temp_scales
+            temp_scales=temp_scales, max_n_nodes=max_n_nodes
         )
