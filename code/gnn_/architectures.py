@@ -110,8 +110,11 @@ class GNNDenoiserFiLMed(nn.Module):
         for k in range(self.n_layers):
             # 2.1 Nodes
             # 2.1.1 Pass Messages Around
+            real_edge_mask = batch.edge_attr[:, -1] == 0
             node_update = self.mp_convolutions[k](
-                hid_node, e_idx, edge_attr=hid_edge)
+                hid_node, e_idx[:, real_edge_mask],
+                edge_attr=hid_edge[real_edge_mask]
+            )
             # 2.1.2 Cast Time and Class to Node Level and Modulate
             t_node, y_node = t[batch.batch], y[batch.batch]
             node_update = self.node_filmers[k](
@@ -286,8 +289,11 @@ class GNNDenoiserCrossAttended(nn.Module):
         for k in range(self.n_layers):
             # 2.1 Nodes
             # 2.1.1 Pass Messages Around
+            real_edge_mask = batch.edge_attr[:, -1] == 0
             node_update = self.mp_convolutions[k](
-                hid_node, e_idx, edge_attr=hid_edge)
+                hid_node, e_idx[:, real_edge_mask],
+                edge_attr=hid_edge[real_edge_mask]
+            )
             # 2.1.2 Embed Conditioning onto Nodes using CA
             node_update = self.node_embedders[k](node_update, *node_args)
             # 2.1.3 Residual Connection & Layer Normalization
