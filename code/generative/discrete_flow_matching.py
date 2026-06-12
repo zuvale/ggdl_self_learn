@@ -170,14 +170,15 @@ class CTMCSampler(nn.Module):
         self, denoiser: nn.Module,
         sample_shape: Tuple[int]=(1,), n_steps: int=100,
         y: torch.Tensor|None=None, conditioning: torch.Tensor|None=None,
+        active_node_counts: torch.Tensor|None=None, cfg_scale: float=1.0,
         show_path: bool=False, t_eval: Tuple[int|float, int|float]=(0., 1.),
-        max_n_nodes: int|None=None,
-        **kwargs
+        max_n_nodes: int|None=None, **kwargs
     ) -> Data|List[Data]:
         sample_max_nodes = max_n_nodes or self.max_n_nodes
         batch = graph_initial_samples(
             self.base, sample_shape[0], sample_max_nodes, y=y,
-            conditioning=conditioning, device=self.device
+            conditioning=conditioning, active_node_counts=active_node_counts,
+            device=self.device
         )
         if show_path:
             path_samples = [batch]
@@ -188,7 +189,9 @@ class CTMCSampler(nn.Module):
             (batch.num_graphs,), (t_end - t0) / n_steps, device=self.device)
         for k in range(n_steps):
             batch, t = self.update_step(
-                denoiser, batch, t, h, self.compute_step_probs, **kwargs)
+                denoiser, batch, t, h, self.compute_step_probs,
+                cfg_scale=cfg_scale, **kwargs
+            )
             if show_path:
                 path_samples.append(batch)
         
@@ -201,7 +204,8 @@ class CTMCSampler(nn.Module):
         self, denoiser: nn.Module, batch: Data, t: torch.Tensor,
         h: torch.Tensor, no_atom_bias: float|None=None,
         bond_order_bias: Tuple[float, float, float]|None=None,
-        exit_cap: float|None=None, temp_scales: Tuple[float, float]=(1., 1.)
+        exit_cap: float|None=None, temp_scales: Tuple[float, float]=(1., 1.),
+        cfg_scale: float=1.0
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         batch = batch.clone()
         e_idx, n_nodes = batch.edge_index, batch.num_nodes
@@ -217,6 +221,18 @@ class CTMCSampler(nn.Module):
             self._add_edge_bias(edge_logits, "double", dbl_b)
             self._add_edge_bias(edge_logits, "triple", tpl_b)
             self._add_edge_bias(edge_logits, "no_bond", ne_b)
+
+        if cfg_scale != 1.0:
+            uncond = batch.clone()
+            if uncond.y is not None:
+                uncond.y = torch.full_like(uncond.y, -1)
+            if uncond.get("conditioning") is not None:
+                uncond.conditioning = torch.zeros_like(uncond.conditioning)
+
+            node_u, edge_u = denoiser(uncond, t)
+            node_logits = node_u + cfg_scale * (node_logits - node_u)
+            edge_logits = edge_u + cfg_scale * (edge_logits - edge_u)
+
         triu_e_logits = extract_triu_edge_data(e_idx, edge_logits)
         node_final, triu_e_final = self.endpoint_sampling(
             node_logits, triu_e_logits, node_temp=temp_scales[0],
@@ -237,6 +253,24 @@ class CTMCSampler(nn.Module):
             triu_e_token, triu_e_prob, exit_cap=exit_cap)
         step_prob_edge = mirror_triu_to_tril_again(
             e_idx, edge_logits, triu_e_prob, n_nodes)
+        
+        if batch.get("active_mask") is not None:
+            active = batch.active_mask.bool()
+
+            step_prob_node = step_prob_node.clone()
+            step_prob_node[~active] = 0.0
+            step_prob_node[~active, -1] = 1.0
+
+            step_prob_node[active, -1] = 0.0
+            step_prob_node[active] = (
+                step_prob_node[active] / step_prob_node[active]
+                    .sum(dim=-1, keepdim=True).clamp_min(self.EPS)
+            )
+
+            edge_active = active[row] & active[col]
+            step_prob_edge = step_prob_edge.clone()
+            step_prob_edge[~edge_active] = 0.0
+            step_prob_edge[~edge_active, -1] = 1.0
         
         return step_prob_node, step_prob_edge
     
@@ -345,7 +379,10 @@ class DeFoG(nn.Module):
     def forward(
         self, batch: Data, edge_loss_weight: float=1.0,
         node_weights: torch.Tensor=torch.ones(8),
-        edge_weights: torch.Tensor=torch.ones(4)
+        edge_weights: torch.Tensor=torch.ones(4),
+        atom_count_weight: float=0.0, isolate_weight: float=0.0,
+        valence_weight: float=0.0, atom_valences: torch.Tensor|None=None,
+        bond_orders: torch.Tensor|None=None
     ) -> torch.Tensor:
         t = torch.rand(len(batch), device=batch.x.device)
         noisy_batch = self.noiser(batch, t)
@@ -361,15 +398,80 @@ class DeFoG(nn.Module):
         triu_e_logits = extract_triu_edge_data(batch.edge_index, edge_logits)
         edge_loss = F.cross_entropy(
             triu_e_logits, triu_e_attr.float(), weight=edge_weights)
-
-        loss = node_loss + edge_loss_weight * edge_loss
+        
+        struct_loss = self.structure_loss(
+            batch, node_logits, triu_e_logits, self.max_n_nodes,
+            atom_count_weight=atom_count_weight, isolate_weight=isolate_weight,
+            valence_weight=valence_weight, atom_valences=atom_valences,
+            bond_orders=bond_orders
+        )
+        loss = node_loss + edge_loss_weight * edge_loss + struct_loss
 
         return loss
+
+    @staticmethod
+    def structure_loss(
+        batch: torch.Tensor, node_logits: torch.Tensor,
+        triu_e_logits: torch.Tensor, max_n_nodes: int,
+        atom_count_weight: float=0.0, isolate_weight: float=0.0,
+        valence_weight: float=0.0, atom_valences: torch.Tensor|None=None,
+        bond_orders: torch.Tensor|None=None
+    ) -> torch.Tensor:
+        struct_loss = node_logits.new_tensor(0.0)
+        node_probs = F.softmax(node_logits, dim=-1)
+        triu_e_probs = F.softmax(triu_e_logits, dim=-1)
+
+        real_node_p = 1.0 - node_probs[:, -1]
+        real_edge_p = 1.0 - triu_e_probs[:, -1]
+
+        if atom_count_weight and batch.get("conditioning_raw") is not None:
+            pred_atoms = torch.zeros(batch.num_graphs, device=batch.x.device)
+            pred_atoms.scatter_add_(0, batch.batch, real_node_p)
+            target_atoms = batch.conditioning_raw[:, 0].to(batch.x.device)
+            struct_loss = struct_loss + atom_count_weight * F.mse_loss(
+                pred_atoms / max_n_nodes, target_atoms / max_n_nodes
+            )
+
+        row, col = batch.edge_index
+        upper = row < col
+        u, v = row[upper], col[upper]
+
+        expected_degree = torch.zeros(batch.num_nodes, device=batch.x.device)
+        expected_degree.scatter_add_(0, u, real_edge_p)
+        expected_degree.scatter_add_(0, v, real_edge_p)
+
+        if isolate_weight:
+            isolate_loss = (
+                real_node_p * F.relu(1.0 - expected_degree)
+            ).sum() / real_node_p.sum().clamp_min(1.0)
+            struct_loss = struct_loss + isolate_weight * isolate_loss
+
+        if (
+            valence_weight and atom_valences is not None
+                and bond_orders is not None
+        ):
+            atom_valences = atom_valences.to(batch.x.device)
+            bond_orders = bond_orders.to(batch.x.device)
+
+            max_valence = node_probs @ atom_valences
+            expected_bond_order = triu_e_probs @ bond_orders
+
+            valence = torch.zeros(batch.num_nodes, device=batch.x.device)
+            valence.scatter_add_(0, u, expected_bond_order)
+            valence.scatter_add_(0, v, expected_bond_order)
+
+            valence_loss = (
+                real_node_p * F.relu(valence - max_valence).pow(2)
+            ).sum() / real_node_p.sum().clamp_min(1.0)
+            struct_loss = struct_loss + valence_weight * valence_loss
+        
+        return struct_loss
     
     @torch.inference_mode()
     def sample(
         self, sample_shape=(1,), n_steps: int=100, y: torch.Tensor|None=None,
-        conditioning: torch.Tensor|None=None,
+        conditioning: torch.Tensor|None=None, cfg_scale: float=1.0,
+        active_node_counts: torch.Tensor|None=None,
         show_path: bool=False, no_atom_bias: float|None=None,
         bond_order_bias: Tuple[float, float, float]=(0., 0., 0.),
         exit_cap: float=0.5, temp_scales: Tuple[float, float]=(1., 1.),
@@ -377,6 +479,7 @@ class DeFoG(nn.Module):
     ) -> torch.Tensor|Tuple[torch.Tensor, torch.Tensor]:
         return self.sampler(
             self.denoiser, sample_shape, y=y, conditioning=conditioning,
+            active_node_counts=active_node_counts, cfg_scale=cfg_scale,
             n_steps=n_steps, show_path=show_path, no_atom_bias=no_atom_bias,
             bond_order_bias=bond_order_bias, exit_cap=exit_cap,
             temp_scales=temp_scales, max_n_nodes=max_n_nodes
