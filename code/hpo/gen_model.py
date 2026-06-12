@@ -63,10 +63,40 @@ MOLFM_BOUNDS = [
 CATFLOW_BOUNDS = MOLFM_BOUNDS + [
     FloatVar(lb=0.0, ub=0.01, name="weight_decay"),
 ]
-DEFOG_BOUNDS = MOLFM_BOUNDS + [
-    FloatVar(lb=0.2, ub=0.8, name="rate_exit_cap"),
-    FloatVar(lb=0.5, ub=1.0, name="node_scale"),
-    FloatVar(lb=0.3, ub=1.0, name="edge_scale"),
+# commented out for now to test newest designs
+#DEFOG_BOUNDS = MOLFM_BOUNDS + [
+#    FloatVar(lb=0.2, ub=0.8, name="rate_exit_cap"),
+#    FloatVar(lb=0.5, ub=1.0, name="node_scale"),
+#    FloatVar(lb=0.3, ub=1.0, name="edge_scale"),
+#]
+DEFOG_BOUNDS = [
+    MixedSetVar(valid_sets=[48, 64, 96], name="node_hidden"),
+    MixedSetVar(valid_sets=[48, 64, 96], name="edge_hidden"),
+    MixedSetVar(valid_sets=[8, 16, 32], name="emb_size"),
+    IntegerVar(lb=2, ub=5, name="n_layers"),
+
+    FloatVar(lb=0.5, ub=2.0, name="lambda_eloss"),
+    FloatVar(lb=0.3, ub=0.9, name="no_atom_weight"),
+    FloatVar(lb=0.6, ub=1.2, name="dbl_weight"),
+    FloatVar(lb=0.05, ub=0.3, name="tpl_weight"),
+    FloatVar(lb=1.0, ub=2.5, name="ne_weight"),
+
+    FloatVar(lb=0.1, ub=1.5, name="atom_count_weight"),
+    FloatVar(lb=0.0, ub=0.75, name="isolate_weight"),
+    FloatVar(lb=0.5, ub=4.0, name="valence_weight"),
+    FloatVar(lb=0.0, ub=0.25, name="cond_drop_prob"),
+
+    FloatVar(lb=-1.0, ub=0.2, name="dbl_bias"),
+    FloatVar(lb=-2.5, ub=-0.5, name="tpl_bias"),
+    FloatVar(lb=0.0, ub=1.2, name="ne_bias"),
+    FloatVar(lb=0.15, ub=0.5, name="rate_exit_cap"),
+    FloatVar(lb=0.6, ub=1.0, name="node_scale"),
+    FloatVar(lb=0.4, ub=0.9, name="edge_scale"),
+    FloatVar(lb=1.0, ub=1.35, name="cfg_scale"),
+
+    IntegerVar(lb=12, ub=22, name="target_atoms"),
+    FloatVar(lb=0.0003, ub=0.003, name="learning_rate"),
+    MixedSetVar(valid_sets=[1, 2, 4], name="ca_heads"),
 ]
 
 
@@ -235,8 +265,8 @@ class FMMolSearchProblem(Problem):
         graph_bond_score = 0
         graph_nonempty = 0
         min_atoms = 8
-        target_size = 15
-        target_bonds = 15
+        target_size = int(x_decoded.get("target_atoms", 15))
+        target_bonds = max(target_size - 1, round(1.05 * target_size))
         ring_ratio = 0
         for _ in range(self.n_replicates):
             model = self.define_model(x_decoded)
@@ -282,7 +312,8 @@ class FMMolSearchProblem(Problem):
 
             sampled_mols = batch_to_mols(
                 sampled_graphs, self.data_set.atom_vocab,
-                self.data_set.bond_vocab, self.data_set.max_n_atoms
+                self.data_set.bond_vocab,
+                sampled_graphs.num_nodes // sampled_graphs.num_graphs
             )
 
             del model
@@ -372,6 +403,57 @@ class FMMolSearchProblem(Problem):
         return NotImplementedError
 
 class DeFoGMolSearchProblem(FMMolSearchProblem):
+    def training_loop(
+        self, model: nn.Module, optimizer, hyperpars: Dict) -> None:
+        model.train()
+        atom_valences = torch.tensor(
+            [4, 3, 2, 1, 1, 1, 1, 0],
+            dtype=torch.float,
+            device=self.device,
+        )
+        bond_orders = torch.tensor(
+            [1, 2, 3, 0], dtype=torch.float, device=self.device)
+
+        for _ in range(self.n_epochs):
+            for batch in self.data_loader:
+                optimizer.zero_grad()
+                batch = batch.to(self.device)
+
+                drop_p = hyperpars["cond_drop_prob"]
+                if drop_p > 0:
+                    batch = batch.clone()
+                    drop = torch.rand(
+                        batch.num_graphs, device=self.device) < drop_p
+                    batch.y = batch.y.clone()
+                    batch.y[drop] = -1
+                    if batch.get("conditioning") is not None:
+                        batch.conditioning = batch.conditioning.clone()
+                        batch.conditioning[drop] = 0.0
+
+                loss = model(
+                    batch,
+                    edge_loss_weight=hyperpars["lambda_eloss"],
+                    node_weights=torch.tensor(
+                        [1, 1, 1, 1, 1, 1, 1, hyperpars["no_atom_weight"]],
+                        dtype=torch.float,
+                        device=self.device,
+                    ),
+                    edge_weights=torch.tensor(
+                        [1.0, hyperpars["dbl_weight"],
+                        hyperpars["tpl_weight"], hyperpars["ne_weight"]],
+                        dtype=torch.float,
+                        device=self.device,
+                    ),
+                    atom_count_weight=hyperpars["atom_count_weight"],
+                    isolate_weight=hyperpars["isolate_weight"],
+                    valence_weight=hyperpars["valence_weight"],
+                    atom_valences=atom_valences,
+                    bond_orders=bond_orders,
+                )
+
+                loss.backward()
+                optimizer.step()
+
     def define_model(self, hyperpars: Dict) -> nn.Module:
         base_dist = MarginalGraphBase(self.data_set, device=self.device)
         noiser = LinearDiscreteNoiser(base_dist)
@@ -382,9 +464,11 @@ class DeFoGMolSearchProblem(FMMolSearchProblem):
         emb_size = hyperpars["emb_size"]
         n_classes = 2
         n_update = hyperpars["n_layers"]
+        max_nodes = getattr(
+            self.data_set, "max_capacity", self.data_set.max_n_atoms)
         denoiser = GNNDenoiserCrossAttended(
             n_atom_tokens, n_bond_tokens, node_hidden_size, edge_hidden_size,
-            emb_size, n_layers=n_update, message_passing="pna_conv",
+            emb_size, n_layers=n_update, message_passing="gineconv",
             ca_heads=hyperpars["ca_heads"], loader=self.data_loader,
             conditioning_args=[
                 ("cont_sine_pe", {"embedding_dim": emb_size}),
@@ -395,14 +479,18 @@ class DeFoGMolSearchProblem(FMMolSearchProblem):
             ]
         ).to(self.device)
         sampler = CTMCSampler(
-            base_dist, LinearDiscreteRateMatrix(
+            base_dist,
+            LinearDiscreteRateMatrix(
                 base_dist, n_atom_tokens, n_bond_tokens).to(self.device),
-            n_atom_tokens, n_bond_tokens, self.data_set.max_n_atoms,
-            device=self.device
+            n_atom_tokens,
+            n_bond_tokens,
+            max_nodes,
+            device=self.device,
+            bond_types=self.data_set.bond_token_names,
         )
         model = DeFoG(
-            base_dist, noiser, denoiser, sampler, n_atom_tokens, n_bond_tokens,
-            self.data_set.max_n_atoms
+            base_dist, noiser, denoiser, sampler,
+            n_atom_tokens, n_bond_tokens, max_nodes,
         ).to(self.device)
 
         return model
@@ -417,45 +505,49 @@ class DeFoGMolSearchProblem(FMMolSearchProblem):
         hyperpars: Dict
     ) -> Data:
         with torch.inference_mode():
-                model.eval()
-                y = torch.cat((
-                    torch.ones((n_samples//2,), dtype=torch.long),
-                    torch.zeros((n_samples//2,), dtype=torch.long),
-                ))
-                conditioning = torch.cat(
-                    [
-                        (
-                            torch.log1p(torch.randint(
-                                1, self.data_set.max_n_atoms, (n_samples, 1)))
-                                / math.log1p(self.data_set.max_n_atoms)
-                        ),
-                        (
-                            torch.log1p(torch.randint(
-                                1, self.data_set.max_n_heteroatoms,
-                                (n_samples, 1)
-                            ))
-                                / math.log1p(self.data_set.max_n_heteroatoms)
-                        ),
-                        (
-                            torch.log1p(torch.randint(
-                                1, self.data_set.max_n_rings, (n_samples, 1)))
-                                / math.log1p(self.data_set.max_n_rings)
-                        )
-                    ], dim=1
-                ).to(self.device)
+            model.eval()
 
-                batch = model.sample(
-                    (n_samples,), y=y, n_steps=n_ode_steps,
-                    conditioning=conditioning,
-                    no_atom_bias=hyperpars["no_atom_bias"],
-                    bond_order_bias=(
-                        hyperpars["dbl_bias"], hyperpars["tpl_bias"],
-                        hyperpars["ne_bias"]
-                    ),
-                    exit_cap=hyperpars["rate_exit_cap"],
-                    temp_scales=(
-                        hyperpars["node_scale"], hyperpars["edge_scale"])
-                )
+            y = torch.cat((
+                torch.ones((n_samples // 2,), dtype=torch.long),
+                torch.zeros((n_samples // 2,), dtype=torch.long),
+            )).to(self.device)
+
+            target_atoms = int(hyperpars["target_atoms"])
+            target_hetero = min(
+                self.data_set.max_n_heteroatoms,
+                max(1, round(0.29 * target_atoms)),
+            )
+            target_rings = min(
+                self.data_set.max_n_rings,
+                max(1, round(0.16 * target_atoms)),
+            )
+
+            conditioning = self.data_set.sample_conditioning(
+                target_atoms, target_hetero, target_rings,
+                repeat=n_samples, device=self.device,
+            )
+            active_node_counts = torch.full(
+                (n_samples,), target_atoms, dtype=torch.long, device=self.device,
+            )
+            max_n_nodes = self.data_set.capacity_for_n_atoms(target_atoms)
+
+            batch = model.sample(
+                (n_samples,),
+                y=y,
+                n_steps=n_ode_steps,
+                conditioning=conditioning,
+                active_node_counts=active_node_counts,
+                cfg_scale=hyperpars["cfg_scale"],
+                no_atom_bias=None,
+                bond_order_bias=(
+                    hyperpars["dbl_bias"],
+                    hyperpars["tpl_bias"],
+                    hyperpars["ne_bias"],
+                ),
+                exit_cap=hyperpars["rate_exit_cap"],
+                temp_scales=(hyperpars["node_scale"], hyperpars["edge_scale"]),
+                max_n_nodes=max_n_nodes,
+            )
 
         return batch
 
