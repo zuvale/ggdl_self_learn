@@ -68,10 +68,11 @@ class ClassEmbedding(nn.Module):
             # if some classes are missing (e.g. for unconditional training
             # with dropout)
             if (y < 0).any():
-                m = (y < 0).float().view(-1, 1, 1)
+                safe_y = y.clamp_min(0)
+                m = (y < 0).float().view(-1, 1)
                 c = (
-                    (1 - m) * self.enc[y]
-                        + m * self.enc.mean(dim=0).unsqueeze(0)
+                    (1 - m) * self.enc[safe_y]
+                        + m * self.enc.mean(dim=0, keepdim=True)
                 )
             else:
                 c = self.enc[y]
