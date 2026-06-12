@@ -37,7 +37,7 @@ if __name__ == "__main__":
     )
     common_parser.add_argument(
         "-p", "--population-size", type=int,
-        help="number of population members that participate in the optimiation"
+        help="number of population members that participate in the optimization"
     )
     common_parser.add_argument(
         "-e", "--epochs", type=int, default=100,
