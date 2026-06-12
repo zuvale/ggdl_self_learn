@@ -9,7 +9,8 @@ from typing import Tuple
 def graph_initial_samples(
     base_dist: nn.Module, batch_size: int, max_n_nodes: int,
     y: torch.Tensor|None=None, device: str="cpu",
-    conditioning: torch.Tensor|None=None
+    conditioning: torch.Tensor|None=None,
+    active_node_counts: torch.Tensor|None=None
 ) -> Data:
     data_list = []
 
@@ -38,6 +39,13 @@ def graph_initial_samples(
         )
         if conditioning is not None:
             data.conditioning = conditioning[i].view(1, -1)
+        
+        if active_node_counts is not None:
+            n_active = int(active_node_counts[i])
+            active_mask = torch.zeros(
+                max_n_nodes, dtype=torch.bool, device=device)
+            active_mask[:n_active] = True
+            data.active_mask = active_mask
 
         data_list.append(data)
 
