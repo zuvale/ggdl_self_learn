@@ -76,25 +76,25 @@ DEFOG_BOUNDS = [
     IntegerVar(lb=2, ub=5, name="n_layers"),
 
     FloatVar(lb=0.5, ub=2.0, name="lambda_eloss"),
-    FloatVar(lb=0.3, ub=0.9, name="no_atom_weight"),
+    FloatVar(lb=0.6, ub=1.2, name="no_atom_weight"),
     FloatVar(lb=0.6, ub=1.2, name="dbl_weight"),
     FloatVar(lb=0.05, ub=0.3, name="tpl_weight"),
     FloatVar(lb=1.0, ub=2.5, name="ne_weight"),
 
-    FloatVar(lb=0.1, ub=1.5, name="atom_count_weight"),
-    FloatVar(lb=0.0, ub=0.75, name="isolate_weight"),
-    FloatVar(lb=0.5, ub=4.0, name="valence_weight"),
+    FloatVar(lb=0.75, ub=3.0, name="atom_count_weight"),
+    FloatVar(lb=0.15, ub=1.25, name="isolate_weight"),
+    FloatVar(lb=1.5, ub=6.0, name="valence_weight"),
     FloatVar(lb=0.0, ub=0.25, name="cond_drop_prob"),
 
     FloatVar(lb=-1.0, ub=0.2, name="dbl_bias"),
     FloatVar(lb=-2.5, ub=-0.5, name="tpl_bias"),
-    FloatVar(lb=0.0, ub=1.2, name="ne_bias"),
+    FloatVar(lb=0.3, ub=1.5, name="ne_bias"),
     FloatVar(lb=0.15, ub=0.5, name="rate_exit_cap"),
     FloatVar(lb=0.6, ub=1.0, name="node_scale"),
     FloatVar(lb=0.4, ub=0.9, name="edge_scale"),
     FloatVar(lb=1.0, ub=1.35, name="cfg_scale"),
 
-    IntegerVar(lb=12, ub=22, name="target_atoms"),
+    IntegerVar(lb=16, ub=22, name="target_atoms"),
     FloatVar(lb=0.0003, ub=0.003, name="learning_rate"),
     MixedSetVar(valid_sets=[1, 2, 4], name="ca_heads"),
 ]
@@ -264,8 +264,8 @@ class FMMolSearchProblem(Problem):
         graph_atom_score = 0
         graph_bond_score = 0
         graph_nonempty = 0
-        min_atoms = 8
         target_size = int(x_decoded.get("target_atoms", 15))
+        min_atoms = max(8, int(0.75 * target_size))
         target_bonds = max(target_size - 1, round(1.05 * target_size))
         ring_ratio = 0
         for _ in range(self.n_replicates):
@@ -301,10 +301,16 @@ class FMMolSearchProblem(Problem):
                 minlength=sampled_graphs.num_graphs
             )
 
-            graph_atom_score += torch.clamp(
-                real_nodes_per_graph / target_size, max=1.0).mean().item()
-            graph_bond_score += torch.clamp(
-                real_edges_per_graph / target_bonds, max=1.0).mean().item()
+            atom_score = 1.0 - (
+                (real_nodes_per_graph - target_size).abs() / target_size
+            ).clamp(max=1.0)
+
+            bond_score = 1.0 - (
+                (real_edges_per_graph - target_bonds).abs() / target_bonds
+            ).clamp(max=1.0)
+
+            graph_atom_score += atom_score.mean().item()
+            graph_bond_score += bond_score.mean().item()
             graph_nonempty += (
                 (real_nodes_per_graph >= min_atoms)
                 & (real_edges_per_graph > 0)
@@ -348,7 +354,10 @@ class FMMolSearchProblem(Problem):
         graph_bond_score /= self.n_replicates
         graph_nonempty /= self.n_replicates
         ring_ratio /= self.n_replicates
-        size_score = min(mean_size / target_size, 1.0)
+        size_score = max(
+            0.0,
+            1.0 - abs(mean_size - target_size) / target_size,
+        )
 
         graph_score = (
             0.45 * graph_atom_score
